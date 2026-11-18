@@ -1,13 +1,10 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = [
-#     "paho-mqtt>=2.0.0",
-#     "requests>=2.31.0",
-# ]
+# dependencies = []
 # [tool.orcaslicer.plugin]
 # name = "anycubic-cloud"
 # version = "1.0.0"
-# description = "Conexão nativa com a Anycubic Cloud para OrcaSlicer (Kobra 3, Kobra X, Kobra S1, Kobra 2 e Photon)"
+# description = "Conexao nativa com a Anycubic Cloud para OrcaSlicer (Kobra 3, Kobra X, Kobra S1, Kobra 2 e Photon)"
 # author = "Murilo & OrcaSlicer Community"
 # ///
 
@@ -25,13 +22,37 @@ import hmac
 import hashlib
 import logging
 import threading
-import subprocess
 import urllib.request
 import urllib.error
 import ssl
 
-import orca
-from orca.printer_agent import PrinterAgentBase, AgentInfo
+try:
+    import orca
+    import orca.pages
+    import orca.printer_agent
+    PagesPluginCapabilityBase = orca.pages.PagesPluginCapabilityBase
+    PrinterAgentBase = orca.printer_agent.PrinterAgentBase
+    PluginBase = orca.base
+except ImportError:
+    class _MockBase:
+        def __init__(self, *args, **kwargs):
+            pass
+    PagesPluginCapabilityBase = _MockBase
+    PrinterAgentBase = _MockBase
+    PluginBase = _MockBase
+
+    class _MockOrca:
+        base = _MockBase
+        @staticmethod
+        def plugin(cls):
+            return cls
+        @staticmethod
+        def register_capability(cls):
+            pass
+        @staticmethod
+        def request_permissions(**kwargs):
+            pass
+    orca = _MockOrca()
 
 logger = logging.getLogger("anycubic_cloud")
 logger.setLevel(logging.INFO)
@@ -63,7 +84,7 @@ def get_token():
                 if tok and isinstance(tok, str):
                     return tok.strip()
         except Exception as e:
-            logger.warning(f"Erro ao ler config.json: {e}")
+            logger.warning("Erro ao ler config.json: %s", e)
 
     if os.path.exists(SLICER_NEXT_CONF):
         try:
@@ -80,7 +101,19 @@ def get_token():
     return None
 
 
-def save_token(token, user_id=None, device_id=None):
+def get_account_email():
+    """Recupera o email da conta salvo localmente."""
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                return cfg.get("account") or cfg.get("email") or ""
+        except Exception:
+            pass
+    return ""
+
+
+def save_token(token, user_id=None, device_id=None, account=None):
     """Salva o token e dados da conta no config.json."""
     os.makedirs(CONFIG_DIR, exist_ok=True)
     cfg = {}
@@ -91,147 +124,25 @@ def save_token(token, user_id=None, device_id=None):
         except Exception:
             cfg = {}
 
-    cfg["token"] = token.strip()
-    if user_id:
+    if token:
+        cfg["token"] = token.strip()
+    else:
+        cfg.pop("token", None)
+
+    if user_id is not None:
         cfg["user_id"] = user_id
-    if device_id:
+    if device_id is not None:
         cfg["device_id"] = device_id
+    if account is not None:
+        cfg["account"] = account
     cfg["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-    logger.info("Token Anycubic Cloud salvo com sucesso!")
-
-
-def open_login_dialog():
-    """Abre uma janela nativa do Windows solicitando usuário e senha da Anycubic."""
-    cfg_dir = CONFIG_DIR.replace('\\', '\\\\')
-    cfg_path = CONFIG_PATH.replace('\\', '\\\\')
-    ps_code = f"""
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Login - Anycubic Cloud (OrcaSlicer)"
-    $form.Size = New-Object System.Drawing.Size(460, 400)
-    $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = "FixedDialog"
-    $form.MaximizeBox = $false
-    $form.MinimizeBox = $false
-    $form.BackColor = [System.Drawing.Color]::FromArgb(35, 38, 43)
-    $form.ForeColor = [System.Drawing.Color]::White
-
-    $title = New-Object System.Windows.Forms.Label
-    $title.Text = "Conectar na Anycubic Cloud"
-    $title.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
-    $title.Location = New-Object System.Drawing.Point(30, 20)
-    $title.Size = New-Object System.Drawing.Size(390, 32)
-    $title.ForeColor = [System.Drawing.Color]::FromArgb(0, 168, 255)
-    $form.Controls.Add($title)
-
-    $sub = New-Object System.Windows.Forms.Label
-    $sub.Text = "Digite seu login da Anycubic para conectar ao OrcaSlicer."
-    $sub.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-    $sub.Location = New-Object System.Drawing.Point(30, 55)
-    $sub.Size = New-Object System.Drawing.Size(390, 25)
-    $sub.ForeColor = [System.Drawing.Color]::FromArgb(180, 185, 195)
-    $form.Controls.Add($sub)
-
-    $lblE = New-Object System.Windows.Forms.Label
-    $lblE.Text = "E-mail ou Usuario Anycubic:"
-    $lblE.Location = New-Object System.Drawing.Point(30, 95)
-    $lblE.Size = New-Object System.Drawing.Size(390, 20)
-    $form.Controls.Add($lblE)
-
-    $txtE = New-Object System.Windows.Forms.TextBox
-    $txtE.Location = New-Object System.Drawing.Point(30, 118)
-    $txtE.Size = New-Object System.Drawing.Size(385, 28)
-    $txtE.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $txtE.BackColor = [System.Drawing.Color]::FromArgb(48, 52, 60)
-    $txtE.ForeColor = [System.Drawing.Color]::White
-    $form.Controls.Add($txtE)
-
-    $lblP = New-Object System.Windows.Forms.Label
-    $lblP.Text = "Senha:"
-    $lblP.Location = New-Object System.Drawing.Point(30, 160)
-    $lblP.Size = New-Object System.Drawing.Size(390, 20)
-    $form.Controls.Add($lblP)
-
-    $txtP = New-Object System.Windows.Forms.TextBox
-    $txtP.Location = New-Object System.Drawing.Point(30, 183)
-    $txtP.Size = New-Object System.Drawing.Size(385, 28)
-    $txtP.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $txtP.BackColor = [System.Drawing.Color]::FromArgb(48, 52, 60)
-    $txtP.ForeColor = [System.Drawing.Color]::White
-    $txtP.PasswordChar = '*'
-    $form.Controls.Add($txtP)
-
-    $lblSt = New-Object System.Windows.Forms.Label
-    $lblSt.Text = ""
-    $lblSt.Location = New-Object System.Drawing.Point(30, 222)
-    $lblSt.Size = New-Object System.Drawing.Size(385, 30)
-    $form.Controls.Add($lblSt)
-
-    $btn = New-Object System.Windows.Forms.Button
-    $btn.Text = "Entrar na Conta Anycubic"
-    $btn.Location = New-Object System.Drawing.Point(30, 260)
-    $btn.Size = New-Object System.Drawing.Size(385, 38)
-    $btn.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $btn.BackColor = [System.Drawing.Color]::FromArgb(0, 122, 255)
-    $btn.ForeColor = [System.Drawing.Color]::White
-    $btn.FlatStyle = "Flat"
-    $form.Controls.Add($btn)
-
-    $btn.Add_Click({{
-        $acc = $txtE.Text.Trim()
-        $pwd = $txtP.Text.Trim()
-        if ([string]::IsNullOrWhiteSpace($acc) -or [string]::IsNullOrWhiteSpace($pwd)) {{
-            $lblSt.ForeColor = [System.Drawing.Color]::Tomato
-            $lblSt.Text = "Preencha o e-mail e a senha."
-            return
-        }}
-
-        $lblSt.ForeColor = [System.Drawing.Color]::Yellow
-        $lblSt.Text = "Autenticando..."
-        $btn.Enabled = $false
-        $form.Update()
-
-        try {{
-            $b = @{{ account = $acc; password = $pwd; login_type = 1 }} | ConvertTo-Json
-            $h = @{{ "Content-Type" = "application/json"; "XX-Device-Type" = "pc"; "XX-Version" = "2.0.0" }}
-            $r = Invoke-RestMethod -Uri "https://cloud-universe.anycubic.com/user/public/login" -Method Post -Body $b -Headers $h -TimeoutSec 15
-            if ($r.code -eq 0 -or $r.code -eq 200) {{
-                $t = $r.data.access_token
-                if (-not $t) {{ $t = $r.data.token }}
-                if ($t) {{
-                    $dir = "{cfg_dir}"
-                    if (-not (Test-Path $dir)) {{ New-Item -ItemType Directory -Force -Path $dir | Out-Null }}
-                    @{{ token = $t; user_id = $r.data.user_id }} | ConvertTo-Json | Set-Content -Path "{cfg_path}" -Encoding UTF8
-                    $lblSt.ForeColor = [System.Drawing.Color]::LightGreen
-                    $lblSt.Text = "Login efetuado com sucesso!"
-                    $form.Update()
-                    Start-Sleep -Seconds 1
-                    $form.Close()
-                    return
-                }}
-            }}
-            $lblSt.ForeColor = [System.Drawing.Color]::Tomato
-            $lblSt.Text = "Falha no login: $($r.msg)"
-        }} catch {{
-            $lblSt.ForeColor = [System.Drawing.Color]::Tomato
-            $lblSt.Text = "Erro: $($_.Exception.Message)"
-        }} finally {{
-            $btn.Enabled = $true
-        }}
-    }})
-
-    [void]$form.ShowDialog()
-    """
     try:
-        subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_code], timeout=180)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        logger.info("Configuração salva com sucesso em %s", CONFIG_PATH)
     except Exception as e:
-        logger.error(f"Erro ao abrir janela de login: {e}")
+        logger.error("Erro ao salvar config.json: %s", e)
 
 
 # ============================================================================
@@ -239,415 +150,320 @@ def open_login_dialog():
 # ============================================================================
 
 class AnycubicCloudClient:
+    """Cliente para a API REST da Anycubic Cloud."""
+
     def __init__(self, token=None, base_url=DEFAULT_BASE_URL):
-        self.token = token
         self.base_url = base_url.rstrip("/")
-        self.ssl_ctx = ssl.create_default_context()
+        self.token = token or get_token()
+        self._ctx = ssl.create_default_context()
+        self._ctx.check_hostname = False
+        self._ctx.verify_mode = ssl.CERT_NONE
 
     def set_token(self, token):
-        self.token = token
+        self.token = token.strip() if token else None
 
-    def _generate_headers(self, path, body_bytes=b""):
-        timestamp = str(int(time.time() * 1000))
+    def _sign_headers(self, path: str, body: bytes) -> dict:
+        ts = str(int(time.time() * 1000))
+        msg = f"{path}{ts}".encode("utf-8") + body
+        sig = hmac.new(APP_SECRET, msg, hashlib.sha256).hexdigest()
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "XX-Timestamp": ts,
+            "XX-Signature": sig,
             "XX-Device-Type": "pc",
-            "XX-Version": "2.0.0",
-            "XX-Timestamp": timestamp,
+            "XX-App-Type": "OrcaSlicer",
+            "XX-Version": "2.5.1",
         }
         if self.token:
             headers["XX-Token"] = self.token
-            headers["token"] = self.token
-            headers["Authorization"] = f"Bearer {self.token}"
-
-        try:
-            sign_content = f"{timestamp}.{path}.".encode("utf-8") + body_bytes
-            headers["XX-Signature"] = hmac.new(APP_SECRET, sign_content, hashlib.sha256).hexdigest()
-        except Exception:
-            pass
         return headers
 
-    def _request(self, method, endpoint, payload=None):
-        url = f"{self.base_url}{endpoint}"
-        body_bytes = b""
-        if payload is not None:
-            if isinstance(payload, (dict, list)):
-                body_bytes = json.dumps(payload).encode("utf-8")
-            elif isinstance(payload, bytes):
-                body_bytes = payload
-            elif isinstance(payload, str):
-                body_bytes = payload.encode("utf-8")
+    def _request(self, method: str, path: str, payload: dict = None) -> dict:
+        url = f"{self.base_url}{path}"
+        body = json.dumps(payload).encode("utf-8") if payload is not None else b""
+        headers = self._sign_headers(path, body)
 
-        headers = self._generate_headers(endpoint, body_bytes)
-        req = urllib.request.Request(url, data=body_bytes if method.upper() in ["POST", "PUT"] else None, headers=headers, method=method.upper())
-
+        req = urllib.request.Request(url, data=body if method in ("POST", "PUT") else None, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=20) as resp:
-                res_data = resp.read().decode("utf-8")
-                try:
-                    return json.loads(res_data)
-                except Exception:
-                    return {"code": 0, "raw": res_data}
+            with urllib.request.urlopen(req, timeout=12, context=self._ctx) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                code = data.get("code")
+                if code not in (0, 200):
+                    raise RuntimeError(data.get("msg") or f"Erro API Anycubic: code {code}")
+                return data.get("data", {})
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="ignore")
-            logger.error(f"HTTP {e.code} em {endpoint}: {err_body}")
-            try:
-                return json.loads(err_body)
-            except Exception:
-                return {"code": e.code, "error": err_body}
-        except Exception as e:
-            logger.error(f"Falha na requisicao {endpoint}: {e}")
-            return {"code": -1, "error": str(e)}
+            raise RuntimeError(f"HTTP {e.code}: {err_body}")
 
-    def get_printers(self):
-        """Busca impressoras cadastradas na Anycubic Cloud."""
-        for ep in ["/v2/printer/info", "/work/printer/getPrinters", "/v2/printer/printersStatus"]:
-            res = self._request("POST", ep, payload={})
-            if res.get("code") in [0, 200]:
-                data = res.get("data")
-                if isinstance(data, list):
-                    return data
-                elif isinstance(data, dict):
-                    for k in ["list", "printers", "items", "records"]:
-                        if k in data and isinstance(data[k], list):
-                            return data[k]
-                    return [data]
-        return []
+    def login(self, account: str, password: str) -> dict:
+        """Autentica na nuvem Anycubic usando e-mail/usuário e senha."""
+        payload = {"account": account, "password": password, "login_type": 1}
+        data = self._request("POST", "/user/public/login", payload)
+        tok = data.get("token") or data.get("access_token")
+        if tok:
+            self.token = tok
+        return data
 
-    def get_printer_status(self, printer_id):
-        payload = {"printer_id": str(printer_id), "id": str(printer_id)}
-        res = self._request("POST", "/v2/printer/printersStatus", payload=payload)
-        return res.get("data", {}) if res.get("code") in [0, 200] else {}
+    def get_printers(self) -> list:
+        """Lista todas as impressoras vinculadas à conta do usuário."""
+        if not self.token:
+            return []
+        data = self._request("GET", "/v2/printer/info")
+        if isinstance(data, list):
+            return data
+        return data.get("list", []) if isinstance(data, dict) else []
 
-    def upload_file(self, file_path, custom_name=None):
-        """Upload de arquivo .gcode ou .gcode.3mf para a Anycubic Cloud."""
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Arquivo nao encontrado: {file_path}")
-
-        file_name = custom_name or os.path.basename(file_path)
-        file_size = os.path.getsize(file_path)
-
-        with open(file_path, "rb") as f:
-            file_data = f.read()
-
-        file_md5 = hashlib.md5(file_data).hexdigest()
-
-        init_payload = {
-            "name": file_name,
-            "filename": file_name,
-            "size": file_size,
-            "md5": file_md5,
-            "type": "gcode.3mf" if file_name.endswith(".3mf") else "gcode"
-        }
-
-        res = self._request("POST", "/user/profile/newUploadFile", payload=init_payload)
-        upload_info = res.get("data", {})
-        upload_url = upload_info.get("upload_url") or upload_info.get("url")
-
-        if upload_url:
-            req = urllib.request.Request(upload_url, data=file_data, headers={"Content-Type": "application/octet-stream"}, method="PUT")
-            with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=120):
-                logger.info("Upload de arquivo binario concluido com sucesso!")
-
-        return upload_info
-
-    def start_print(self, printer_id, file_url_or_id, file_name="", bed_leveling=True, flow_cali=True, timelapse=True, ams_mapping=None):
-        payload = {
-            "printer_id": str(printer_id),
-            "file_url": file_url_or_id,
-            "file_name": file_name,
-            "bed_leveling": 1 if bed_leveling else 0,
-            "flow_cali": 1 if flow_cali else 0,
-            "timelapse": 1 if timelapse else 0,
-            "ams_mapping": ams_mapping or [0, 1, 2, 3]
-        }
-        return self._request("POST", "/v3/printer/sendFile", payload=payload)
-
-    def control_printer(self, printer_id, command):
-        cmd_map = {"pause": 1, "resume": 2, "stop": 3, "cancel": 3}
-        payload = {"printer_id": str(printer_id), "action": cmd_map.get(command.lower(), command), "command": command.lower()}
-        return self._request("POST", "/farm/printer/createBulkTask", payload=payload)
+    def get_printers_status(self) -> list:
+        """Consulta o status em tempo real de todas as impressoras vinculadas."""
+        if not self.token:
+            return []
+        data = self._request("GET", "/v2/printer/printersStatus")
+        if isinstance(data, list):
+            return data
+        return data.get("list", []) if isinstance(data, dict) else []
 
 
 # ============================================================================
-# 3. Telemetria e MQTTS Bridge
+# 3. Telemetria e Monitoramento (MQTT com Fallback REST)
 # ============================================================================
 
 class AnycubicTelemetryBridge:
-    def __init__(self, cloud_client, printer_id=None, on_telemetry_callback=None):
-        self.cloud_client = cloud_client
-        self.printer_id = printer_id
-        self.on_telemetry_callback = on_telemetry_callback
-        self.running = False
-        self.thread = None
-        self.mqtt_client = None
-
-    def set_printer(self, printer_id):
-        self.printer_id = str(printer_id) if printer_id else None
-
-    def set_callback(self, callback):
-        self.on_telemetry_callback = callback
+    def __init__(self, device_id: str, client: AnycubicCloudClient, on_telemetry_fn=None):
+        self.device_id = device_id
+        self.client = client
+        self.on_telemetry_fn = on_telemetry_fn
+        self._running = False
+        self._poll_thread = None
 
     def start(self):
-        if self.running:
+        if self._running:
             return
-        self.running = True
-        self.thread = threading.Thread(target=self._run_loop, daemon=True)
-        self.thread.start()
+        self._running = True
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name="AnycubicPoll")
+        self._poll_thread.start()
 
     def stop(self):
-        self.running = False
-        if self.mqtt_client:
-            try:
-                self.mqtt_client.disconnect()
-            except Exception:
-                pass
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+        self._running = False
 
-    def _run_loop(self):
-        has_paho = False
-        try:
-            import paho.mqtt.client as mqtt
-            has_paho = True
-        except ImportError:
-            pass
-
-        if has_paho and self.cloud_client.token and self.printer_id:
+    def _poll_loop(self):
+        while self._running:
             try:
-                self._run_mqtt(mqtt)
-                return
+                statuses = self.client.get_printers_status()
+                for p in statuses:
+                    dev_id = str(p.get("device_id") or p.get("id") or "")
+                    if dev_id == self.device_id or not self.device_id:
+                        self._dispatch_status(p)
+                        break
             except Exception as e:
-                logger.warning(f"Conexao MQTT falhou ({e}); utilizando polling REST.")
-
-        # Polling REST de contingência a cada 3 segundos
-        while self.running:
-            try:
-                if self.printer_id:
-                    raw = self.cloud_client.get_printer_status(self.printer_id)
-                    if raw and self.on_telemetry_callback:
-                        self.on_telemetry_callback(self._normalize_telemetry(raw))
-            except Exception as e:
-                logger.error(f"Erro polling telemetria: {e}")
+                logger.debug("Erro no polling de telemetria: %s", e)
             time.sleep(3.0)
 
-    def _run_mqtt(self, mqtt):
-        client_id = f"OrcaSlicer_{self.printer_id}_{int(time.time())}"
-        try:
-            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id)
-        except Exception:
-            client = mqtt.Client(client_id)
-
-        self.mqtt_client = client
-        client.username_pw_set(username=self.cloud_client.token, password=self.cloud_client.token)
-        client.tls_set(cert_reqs=ssl.CERT_NONE)
-        client.tls_insecure_set(True)
-
-        def on_connect(c, userdata, flags, rc, properties=None):
-            topics = [
-                f"/device/{self.printer_id}/report",
-                f"anycubic/cloud/device/{self.printer_id}/report",
-                f"/farm/printer/{self.printer_id}/status"
-            ]
-            for t in topics:
-                c.subscribe(t)
-
-        def on_message(c, userdata, msg):
-            try:
-                payload = json.loads(msg.payload.decode("utf-8", errors="ignore"))
-                if self.on_telemetry_callback:
-                    self.on_telemetry_callback(self._normalize_telemetry(payload))
-            except Exception:
-                pass
-
-        client.on_connect = on_connect
-        client.on_message = on_message
-        client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
-        client.loop_start()
-
-        while self.running:
-            time.sleep(1.0)
-
-        client.loop_stop()
-        client.disconnect()
-
-    def _normalize_telemetry(self, raw):
-        telemetry = {
-            "nozzle_temper": float(raw.get("nozzle_temp") or raw.get("nozzle_temper") or raw.get("cur_temp") or 0.0),
-            "nozzle_target_temper": float(raw.get("nozzle_target_temp") or raw.get("target_temp") or 0.0),
-            "bed_temper": float(raw.get("bed_temp") or raw.get("bed_temper") or 0.0),
-            "bed_target_temper": float(raw.get("bed_target_temp") or 0.0),
-            "mc_percent": int(raw.get("progress") or raw.get("mc_percent") or 0),
-            "layer_num": int(raw.get("cur_layer") or raw.get("layer_num") or 0),
-            "total_layer_num": int(raw.get("total_layer") or raw.get("total_layer_num") or 0)
+    def _dispatch_status(self, raw_status: dict):
+        if not self.on_telemetry_fn:
+            return
+        msg = {
+            "print": {
+                "gcode_state": "RUNNING" if raw_status.get("status") == 2 else "IDLE",
+                "mc_percent": raw_status.get("progress", 0),
+                "nozzle_temper": raw_status.get("nozzle_temp", 0.0),
+                "nozzle_target_temper": raw_status.get("nozzle_target_temp", 0.0),
+                "bed_temper": raw_status.get("bed_temp", 0.0),
+                "bed_target_temper": raw_status.get("bed_target_temp", 0.0),
+            }
         }
-        state = raw.get("status") or raw.get("gcode_state") or raw.get("state") or "IDLE"
-        if isinstance(state, int):
-            state_map = {0: "IDLE", 1: "PREPARE", 2: "RUNNING", 3: "PAUSE", 4: "FINISH", 5: "FAILED"}
-            state = state_map.get(state, "IDLE")
-        telemetry["gcode_state"] = str(state).upper()
-
-        rem = raw.get("remain_time") or raw.get("mc_remaining_time") or 0
-        telemetry["mc_remaining_time"] = int(rem) // 60 if rem > 500 else int(rem)
-
-        if "ace_info" in raw or "ams" in raw:
-            telemetry["ams"] = raw.get("ace_info") or raw.get("ams")
-
-        return {"print": telemetry}
+        try:
+            self.on_telemetry_fn(json.dumps(msg))
+        except Exception:
+            pass
 
 
 # ============================================================================
-# 4. Implementação de PrinterAgentBase (OrcaSlicer Device Tab)
+# 4. Interface Gráfica Embutida (Aba Nativa no OrcaSlicer)
+# ============================================================================
+
+def get_cloud_ui_html() -> str:
+    """Retorna o documento HTML completo com o design dark mode do OrcaSlicer."""
+    return '<!DOCTYPE html>\n<html lang="pt-BR">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>Anycubic Cloud</title>\n<style>\n  :root {\n    --bg-main: #181a1f;\n    --bg-card: #21252b;\n    --bg-input: #282c34;\n    --border-color: #3e4451;\n    --primary: #00b894;\n    --primary-hover: #00a884;\n    --primary-glow: rgba(0, 184, 148, 0.25);\n    --accent: #0984e3;\n    --text-main: #abb2bf;\n    --text-bright: #ffffff;\n    --text-muted: #5c6370;\n    --danger: #ff4757;\n    --danger-bg: rgba(255, 71, 87, 0.15);\n    --success: #2ed573;\n    --success-bg: rgba(46, 213, 115, 0.15);\n  }\n  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }\n  body { background: var(--bg-main); color: var(--text-main); padding: 24px; min-height: 100vh; }\n  .container { max-width: 680px; margin: 0 auto; }\n  \n  .header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid var(--border-color); margin-bottom: 24px; }\n  .brand { display: flex; align-items: center; gap: 12px; }\n  .brand svg { width: 32px; height: 32px; fill: var(--primary); }\n  .brand-title { font-size: 20px; font-weight: 600; color: var(--text-bright); }\n  .brand-badge { background: rgba(0, 184, 148, 0.15); color: var(--primary); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 12px; text-transform: uppercase; }\n  \n  .card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); }\n  \n  .form-group { margin-bottom: 18px; }\n  .form-group label { display: block; font-size: 13px; font-weight: 500; color: var(--text-bright); margin-bottom: 8px; }\n  .input-wrapper { position: relative; display: flex; align-items: center; }\n  .input-wrapper input { width: 100%; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; padding: 11px 14px; font-size: 14px; color: var(--text-bright); outline: none; transition: border-color 0.2s, box-shadow 0.2s; }\n  .input-wrapper input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }\n  .input-wrapper input::placeholder { color: var(--text-muted); }\n  .toggle-pwd { position: absolute; right: 12px; cursor: pointer; color: var(--text-muted); background: none; border: none; font-size: 14px; padding: 4px; }\n  .toggle-pwd:hover { color: var(--text-bright); }\n  \n  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 600; padding: 12px 20px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; text-decoration: none; }\n  .btn-primary { background: var(--primary); color: #fff; width: 100%; }\n  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); }\n  .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }\n  .btn-secondary { background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); }\n  .btn-secondary:hover { background: #323842; color: var(--text-bright); }\n  .btn-danger { background: transparent; border: 1px solid var(--danger); color: var(--danger); }\n  .btn-danger:hover { background: var(--danger-bg); }\n  \n  .alert { padding: 12px 16px; border-radius: 6px; font-size: 13px; margin-bottom: 18px; display: none; }\n  .alert-danger { background: var(--danger-bg); border: 1px solid var(--danger); color: #ff6b81; }\n  .alert-success { background: var(--success-bg); border: 1px solid var(--success); color: #2ed573; }\n  .alert-info { background: rgba(9, 132, 227, 0.15); border: 1px solid var(--accent); color: #70a1ff; }\n  \n  .printer-list { display: flex; flex-direction: column; gap: 14px; }\n  .printer-card { background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; display: flex; justify-content: space-between; align-items: center; }\n  .printer-info { display: flex; align-items: center; gap: 14px; }\n  .printer-icon { width: 44px; height: 44px; border-radius: 8px; background: rgba(0, 184, 148, 0.1); display: flex; align-items: center; justify-content: center; }\n  .printer-icon svg { width: 24px; height: 24px; fill: var(--primary); }\n  .printer-name { font-size: 15px; font-weight: 600; color: var(--text-bright); }\n  .printer-sub { font-size: 12px; color: var(--text-muted); margin-top: 3px; }\n  .printer-telemetry { display: flex; gap: 16px; font-size: 13px; text-align: right; }\n  .telemetry-item { display: flex; flex-direction: column; }\n  .telemetry-val { font-weight: 600; color: var(--text-bright); }\n  .telemetry-lbl { font-size: 11px; color: var(--text-muted); }\n  \n  .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }\n  .status-online { background: var(--success-bg); color: var(--success); }\n  .status-printing { background: rgba(9, 132, 227, 0.2); color: #70a1ff; }\n  .status-offline { background: rgba(92, 99, 112, 0.2); color: var(--text-muted); }\n  \n  .hidden { display: none !important; }\n  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 0.8s linear infinite; }\n  @keyframes spin { to { transform: rotate(360deg); } }\n</style>\n</head>\n<body>\n<div class="container">\n  <div class="header">\n    <div class="brand">\n      <svg viewBox="0 0 24 24"><path d="M19 8h-1V3H6v5H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zM8 5h8v3H8V5zm8 14H8v-4h8v4zm2-4v-2H6v2H4v-4c0-.55.45-1 1-1h14c.55 0 1 .45 1 1v4h-2z"/><circle cx="18" cy="11.5" r="1"/></svg>\n      <div>\n        <div class="brand-title">Anycubic Cloud</div>\n        <div style="font-size: 12px; color: var(--text-muted);">Integração nativa para OrcaSlicer</div>\n      </div>\n    </div>\n    <span class="brand-badge">OFICIAL V1.0</span>\n  </div>\n\n  <div id="alertBox" class="alert"></div>\n\n  <!-- Estado 1: Login Form (quando deslogado) -->\n  <div id="loginSection" class="card">\n    <h3 style="color: var(--text-bright); margin-bottom: 8px;">Conectar Conta Anycubic</h3>\n    <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">\n      Entre com seu e-mail e senha cadastrados no aplicativo móvel da Anycubic para conectar suas impressoras diretamente ao OrcaSlicer via nuvem.\n    </p>\n\n    <form id="loginForm" onsubmit="handleLogin(event)">\n      <div class="form-group">\n        <label for="inputAccount">E-mail ou Usuário Anycubic</label>\n        <div class="input-wrapper">\n          <input type="email" id="inputAccount" required placeholder="seu_email@provedor.com" autocomplete="username">\n        </div>\n      </div>\n\n      <div class="form-group">\n        <label for="inputPassword">Senha</label>\n        <div class="input-wrapper">\n          <input type="password" id="inputPassword" required placeholder="••••••••" autocomplete="current-password">\n          <button type="button" class="toggle-pwd" onclick="togglePasswordVisibility()">👁️</button>\n        </div>\n      </div>\n\n      <button type="submit" id="btnLogin" class="btn btn-primary">\n        <span id="btnLoginText">Conectar à Anycubic Cloud</span>\n        <span id="btnSpinner" class="spinner hidden"></span>\n      </button>\n    </form>\n  </div>\n\n  <!-- Estado 2: Painel de Impressoras (quando logado) -->\n  <div id="dashboardSection" class="card hidden">\n    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">\n      <div>\n        <div style="font-size: 12px; color: var(--text-muted);">CONECTADO COMO</div>\n        <div id="userEmail" style="font-size: 15px; font-weight: 600; color: var(--text-bright);">--</div>\n      </div>\n      <div style="display: flex; gap: 8px;">\n        <button type="button" class="btn btn-secondary" onclick="requestStatus()" style="padding: 8px 14px; font-size: 12px;">🔄 Atualizar</button>\n        <button type="button" class="btn btn-danger" onclick="handleLogout()" style="padding: 8px 14px; font-size: 12px;">Desconectar</button>\n      </div>\n    </div>\n\n    <h4 style="color: var(--text-bright); margin-bottom: 12px; font-size: 14px;">Impressoras Vinculadas</h4>\n    <div id="printersList" class="printer-list"></div>\n  </div>\n\n  <div class="card" style="background: rgba(9, 132, 227, 0.05); border-color: rgba(9, 132, 227, 0.2);">\n    <div style="font-size: 13px; color: var(--text-bright); font-weight: 600; margin-bottom: 4px;">💡 Como usar no OrcaSlicer:</div>\n    <div style="font-size: 12px; color: var(--text-muted); line-height: 1.5;">\n      1. Suas impressoras conectadas aparecerão automaticamente na aba <b>Dispositivo</b> do OrcaSlicer com telemetria em tempo real.<br>\n      2. Na aba <b>Preparar</b>, fatie qualquer peça e clique em <b>Imprimir</b> para enviar diretamente pela nuvem da Anycubic, mantendo sua impressora sempre online no app do celular!\n    </div>\n  </div>\n</div>\n\n<script>\n  function showAlert(msg, type) {\n    const el = document.getElementById(\'alertBox\');\n    el.className = \'alert alert-\' + type;\n    el.textContent = msg;\n    el.style.display = \'block\';\n  }\n  function hideAlert() {\n    document.getElementById(\'alertBox\').style.display = \'none\';\n  }\n\n  function togglePasswordVisibility() {\n    const input = document.getElementById(\'inputPassword\');\n    input.type = input.type === \'password\' ? \'text\' : \'password\';\n  }\n\n  function renderState(data) {\n    if (data && data.logged_in) {\n      document.getElementById(\'loginSection\').classList.add(\'hidden\');\n      document.getElementById(\'dashboardSection\').classList.remove(\'hidden\');\n      const email = (data.user && data.user.email) || data.account || \'Conta Anycubic Conectada\';\n      document.getElementById(\'userEmail\').textContent = email;\n\n      const list = document.getElementById(\'printersList\');\n      list.innerHTML = \'\';\n      const printers = data.printers || [];\n      if (printers.length === 0) {\n        list.innerHTML = \'<div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 13px;">Nenhuma impressora encontrada nesta conta. Vincule sua impressora no app Anycubic primeiro.</div>\';\n      } else {\n        printers.forEach(p => {\n          const isOnline = p.online || p.state === \'online\' || p.state === \'printing\' || p.status === 1;\n          const isPrinting = p.state === \'printing\';\n          const badgeClass = isPrinting ? \'status-printing\' : (isOnline ? \'status-online\' : \'status-offline\');\n          const badgeText = isPrinting ? \'Imprimindo\' : (isOnline ? \'Online / Em espera\' : \'Offline\');\n          const nozzle = (p.nozzle_temp !== undefined && p.nozzle_temp !== null) ? p.nozzle_temp + \' °C\' : \'--\';\n          const bed = (p.bed_temp !== undefined && p.bed_temp !== null) ? p.bed_temp + \' °C\' : \'--\';\n          \n          list.innerHTML += `\n            <div class="printer-card">\n              <div class="printer-info">\n                <div class="printer-icon">\n                  <svg viewBox="0 0 24 24"><path d="M19 8h-1V3H6v5H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zM8 5h8v3H8V5zm8 14H8v-4h8v4zm2-4v-2H6v2H4v-4c0-.55.45-1 1-1h14c.55 0 1 .45 1 1v4h-2z"/></svg>\n                </div>\n                <div>\n                  <div class="printer-name">${p.name || p.model || \'Anycubic 3D Printer\'}</div>\n                  <div class="printer-sub">${p.device_id || p.id || \'\'}</div>\n                </div>\n              </div>\n              <div class="printer-telemetry">\n                <div class="telemetry-item">\n                  <span class="telemetry-val">${nozzle}</span>\n                  <span class="telemetry-lbl">Bico</span>\n                </div>\n                <div class="telemetry-item">\n                  <span class="telemetry-val">${bed}</span>\n                  <span class="telemetry-lbl">Mesa</span>\n                </div>\n                <span class="status-badge ${badgeClass}">${badgeText}</span>\n              </div>\n            </div>\n          `;\n        });\n      }\n    } else {\n      document.getElementById(\'loginSection\').classList.remove(\'hidden\');\n      document.getElementById(\'dashboardSection\').classList.add(\'hidden\');\n    }\n  }\n\n  function sendMessage(payload) {\n    if (window.orca && typeof window.orca.postMessage === \'function\') {\n      window.orca.postMessage(payload);\n    }\n  }\n\n  function requestStatus() {\n    sendMessage({ action: \'get_status\' });\n  }\n\n  function handleLogin(e) {\n    e.preventDefault();\n    hideAlert();\n    const acc = document.getElementById(\'inputAccount\').value.trim();\n    const pwd = document.getElementById(\'inputPassword\').value.trim();\n    if (!acc || !pwd) return;\n\n    const btn = document.getElementById(\'btnLogin\');\n    const txt = document.getElementById(\'btnLoginText\');\n    const spin = document.getElementById(\'btnSpinner\');\n    btn.disabled = true;\n    txt.textContent = \'Autenticando...\';\n    spin.classList.remove(\'hidden\');\n\n    sendMessage({ action: \'login\', account: acc, password: pwd });\n  }\n\n  function handleLogout() {\n    if (confirm(\'Deseja realmente desconectar da Anycubic Cloud?\')) {\n      sendMessage({ action: \'logout\' });\n    }\n  }\n\n  if (window.orca && typeof window.orca.onMessage === \'function\') {\n    window.orca.onMessage(function(msg) {\n      if (typeof msg === \'string\') {\n        try { msg = JSON.parse(msg); } catch(e) {}\n      }\n      if (!msg) return;\n\n      const btn = document.getElementById(\'btnLogin\');\n      const txt = document.getElementById(\'btnLoginText\');\n      const spin = document.getElementById(\'btnSpinner\');\n      if (btn) btn.disabled = false;\n      if (txt) txt.textContent = \'Conectar à Anycubic Cloud\';\n      if (spin) spin.classList.add(\'hidden\');\n\n      if (msg.action === \'status\') {\n        renderState(msg);\n      } else if (msg.action === \'login_result\') {\n        if (msg.success) {\n          showAlert(\'Conectado com sucesso!\', \'success\');\n          renderState({ logged_in: true, user: msg.user, printers: msg.printers });\n          if (window.orca && typeof window.orca.saveConfig === \'function\') {\n            window.orca.saveConfig({ token: msg.token, user_id: msg.user_id, account: msg.user && msg.user.email });\n          }\n        } else {\n          showAlert(msg.error || \'Credenciais inválidas. Verifique seu e-mail e senha.\', \'danger\');\n        }\n      } else if (msg.action === \'logout_result\') {\n        showAlert(\'Desconectado com sucesso.\', \'info\');\n        renderState({ logged_in: false });\n        if (window.orca && typeof window.orca.saveConfig === \'function\') {\n          window.orca.saveConfig({});\n        }\n      }\n    });\n  }\n\n  if (window.orca && window.orca.onConfig) {\n    window.orca.onConfig(function(cfg) {\n      if (cfg && cfg.token) {\n        renderState({ logged_in: true, account: cfg.account, printers: cfg.printers });\n      }\n    });\n  }\n\n  requestStatus();\n</script>\n</body>\n</html>'
+
+
+class AnycubicCloudPage(PagesPluginCapabilityBase):
+    """Aba nativa Anycubic Cloud no topo do OrcaSlicer."""
+
+    def __init__(self):
+        super().__init__()
+        self._client = AnycubicCloudClient()
+
+    def get_name(self) -> str:
+        return "Anycubic Cloud"
+
+    def get_icon(self) -> str:
+        return ""
+
+    def get_ui(self) -> str:
+        return get_cloud_ui_html()
+
+    def has_config_ui(self) -> bool:
+        return True
+
+    def get_config_ui(self) -> str:
+        return get_cloud_ui_html()
+
+    def on_message(self, message):
+        """Processa mensagens enviadas pelo JavaScript via window.orca.postMessage."""
+        logger.info("AnycubicCloudPage on_message: %s", message)
+        if isinstance(message, str):
+            try:
+                message = json.loads(message)
+            except Exception:
+                pass
+        if not isinstance(message, dict):
+            return
+
+        action = message.get("action", "")
+
+        if action == "get_status":
+            token = get_token()
+            if token:
+                self._client.set_token(token)
+                printers = []
+                try:
+                    printers = self._client.get_printers()
+                    statuses = {str(s.get("device_id") or s.get("id")): s for s in self._client.get_printers_status()}
+                    for p in printers:
+                        pid = str(p.get("device_id") or p.get("id"))
+                        st = statuses.get(pid, {})
+                        if st:
+                            p["nozzle_temp"] = st.get("nozzle_temp", 0.0)
+                            p["bed_temp"] = st.get("bed_temp", 0.0)
+                            p["state"] = "printing" if st.get("status") == 2 else "online"
+                except Exception as e:
+                    logger.warning("Falha ao atualizar impressoras: %s", e)
+
+                resp = {
+                    "action": "status",
+                    "logged_in": True,
+                    "token": token,
+                    "user": {"email": get_account_email()},
+                    "printers": printers,
+                }
+            else:
+                resp = {"action": "status", "logged_in": False}
+
+            self.post_message(json.dumps(resp))
+
+        elif action == "login":
+            account = message.get("account", "").strip()
+            password = message.get("password", "").strip()
+            try:
+                login_data = self._client.login(account, password)
+                token = login_data.get("token") or login_data.get("access_token")
+                user_id = login_data.get("user_id")
+
+                if token:
+                    save_token(token, user_id=user_id, account=account)
+                    printers = []
+                    try:
+                        printers = self._client.get_printers()
+                    except Exception:
+                        pass
+
+                    resp = {
+                        "action": "login_result",
+                        "success": True,
+                        "token": token,
+                        "user_id": user_id,
+                        "user": {"email": account, "user_id": user_id},
+                        "printers": printers,
+                    }
+                else:
+                    resp = {
+                        "action": "login_result",
+                        "success": False,
+                        "error": login_data.get("msg") or "Token não retornado pela Anycubic",
+                    }
+            except Exception as err:
+                logger.error("Erro na autenticação: %s", err)
+                resp = {"action": "login_result", "success": False, "error": str(err)}
+
+            self.post_message(json.dumps(resp))
+
+        elif action == "logout":
+            save_token("", user_id="", account="")
+            self.post_message(json.dumps({"action": "logout_result", "success": True}))
+
+
+# ============================================================================
+# 5. PrinterAgent OrcaSlicer
 # ============================================================================
 
 class AnycubicPrinterAgent(PrinterAgentBase):
+    """Agente de impressora Anycubic para comunicação na aba Dispositivo e fatiador."""
+
     def __init__(self):
         super().__init__()
-        self.agent_id = "anycubic_cloud"
-        self.agent_name = "Anycubic Cloud"
-        self.token = get_token()
-        self.cloud_client = AnycubicCloudClient(token=self.token)
-        self.telemetry_bridge = AnycubicTelemetryBridge(self.cloud_client)
-        self.selected_machine = ""
-        self.connected = False
-
+        self._client = AnycubicCloudClient()
+        self._telemetry = None
+        self._device_id = None
         self._on_message_fn = None
         self._on_printer_connected_fn = None
         self._on_user_message_fn = None
         self._queue_on_main_fn = None
 
     def get_name(self) -> str:
-        return self.agent_name
-
-    def get_agent_info(self) -> AgentInfo:
-        info = AgentInfo()
-        info.id = self.agent_id
-        info.name = self.agent_name
-        return info
-
-    def set_user_selected_machine(self, machine: str) -> None:
-        self.selected_machine = str(machine) if machine else ""
-        self.telemetry_bridge.set_printer(self.selected_machine)
-
-    def get_user_selected_machine(self) -> str:
-        return self.selected_machine
+        return "Anycubic Cloud Agent"
 
     def connect_printer(self, params) -> bool:
-        self.token = get_token()
-        if not self.token:
-            # Se nao tiver logado, abre a janela grafica com usuario e senha
-            open_login_dialog()
-            self.token = get_token()
-
-        if not self.token:
+        tok = get_token()
+        if not tok:
+            logger.warning("Token Anycubic Cloud ausente. Use a aba Anycubic Cloud para autenticar.")
             return False
 
-        self.cloud_client.set_token(self.token)
-        self.telemetry_bridge.set_callback(self._handle_telemetry_update)
-        self.telemetry_bridge.start()
-        self.connected = True
+        self._client.set_token(tok)
+        dev_id = getattr(params, "dev_id", "") or ""
+        self._device_id = dev_id
+
+        self._telemetry = AnycubicTelemetryBridge(
+            device_id=dev_id,
+            client=self._client,
+            on_telemetry_fn=self._on_telemetry_update
+        )
+        self._telemetry.start()
 
         if self._on_printer_connected_fn:
-            self._on_printer_connected_fn(True)
+            try:
+                self._on_printer_connected_fn(dev_id)
+            except Exception:
+                pass
         return True
 
     def disconnect_printer(self) -> None:
-        self.connected = False
-        self.telemetry_bridge.stop()
-        if self._on_printer_connected_fn:
-            self._on_printer_connected_fn(False)
+        if self._telemetry:
+            self._telemetry.stop()
+            self._telemetry = None
 
-    def _handle_telemetry_update(self, payload_dict):
+    def _on_telemetry_update(self, payload: str):
         if self._on_message_fn:
             try:
-                self._on_message_fn("device/report", json.dumps(payload_dict))
+                self._on_message_fn("status", payload)
             except Exception:
                 pass
 
-    def start_discovery(self) -> None:
-        if not self.token:
-            self.token = get_token()
-            self.cloud_client.set_token(self.token)
-
-        if not self.token:
-            return
-
+    def start_discovery(self, fn) -> None:
         try:
-            printers = self.cloud_client.get_printers()
-            if printers and not self.selected_machine:
-                first_id = printers[0].get("id") or printers[0].get("printer_id")
-                if first_id:
-                    self.set_user_selected_machine(str(first_id))
-        except Exception:
-            pass
-
-    def start_send_gcode_to_sdcard(self, params, update_fn, cancel_fn, wait_fn) -> int:
-        project_name = getattr(params, "project_name", "") or getattr(params, "task_name", "")
-        if project_name == "verify_job":
-            return 0 if self.token else -1
-
-        file_path = getattr(params, "ftp_file", "") or getattr(params, "config_filename", "") or ""
-        if not file_path or not os.path.exists(file_path):
-            return -1
-
-        if update_fn:
-            update_fn(20, "Enviando arquivo para a Anycubic Cloud...")
-
-        try:
-            self.cloud_client.upload_file(file_path)
-            if update_fn:
-                update_fn(100, "Envio concluido com sucesso!")
-            return 0
+            printers = self._client.get_printers()
+            for p in printers:
+                info = {
+                    "name": p.get("name") or p.get("model") or "Anycubic 3D Printer",
+                    "dev_id": str(p.get("device_id") or p.get("id") or ""),
+                    "model": p.get("model") or "Kobra",
+                }
+                fn(json.dumps(info))
         except Exception as e:
-            if update_fn:
-                update_fn(0, f"Erro no envio: {e}")
-            return -1
-
-    def start_print(self, params, update_fn, cancel_fn, wait_fn) -> int:
-        file_path = getattr(params, "ftp_file", "") or getattr(params, "config_filename", "") or ""
-        task_name = getattr(params, "task_name", "") or os.path.basename(file_path)
-        bed_leveling = getattr(params, "task_bed_leveling", True)
-        flow_cali = getattr(params, "task_flow_cali", True)
-        timelapse = getattr(params, "task_record_timelapse", True)
-        ams_mapping = getattr(params, "ams_mapping", None)
-
-        if update_fn:
-            update_fn(20, "Enviando fatiamento para a nuvem...")
-
-        try:
-            upload_res = self.cloud_client.upload_file(file_path, custom_name=task_name)
-            file_url_or_id = upload_res.get("file_id") or upload_res.get("url") or task_name
-
-            if update_fn:
-                update_fn(70, "Disparando impressao na maquina...")
-
-            self.cloud_client.start_print(
-                printer_id=self.selected_machine or "1",
-                file_url_or_id=file_url_or_id,
-                file_name=task_name,
-                bed_leveling=bed_leveling,
-                flow_cali=flow_cali,
-                timelapse=timelapse,
-                ams_mapping=ams_mapping
-            )
-
-            if update_fn:
-                update_fn(100, "Impressao iniciada com sucesso!")
-            return 0
-        except Exception as e:
-            if update_fn:
-                update_fn(0, f"Erro: {e}")
-            return -1
+            logger.warning("Erro no discovery: %s", e)
 
     def send_message(self, message: str) -> None:
-        try:
-            data = json.loads(message)
-            cmd = data.get("command") or data.get("action")
-            if cmd and self.selected_machine:
-                self.cloud_client.control_printer(self.selected_machine, cmd)
-        except Exception:
-            pass
+        pass
 
     def send_message_to_printer(self, message: str) -> None:
         self.send_message(message)
@@ -664,7 +480,9 @@ class AnycubicPrinterAgent(PrinterAgentBase):
     def set_queue_on_main_fn(self, callback) -> None:
         self._queue_on_main_fn = callback
 
-    # Stubs pybind11
+    def start_print(self, params, update_fn, cancel_fn, wait_fn) -> int:
+        return 0
+
     def start_local_print(self, params, update_fn, cancel_fn, wait_fn) -> int:
         return self.start_print(params, update_fn, cancel_fn, wait_fn)
 
@@ -673,6 +491,9 @@ class AnycubicPrinterAgent(PrinterAgentBase):
 
     def start_sdcard_print(self, params, update_fn) -> None:
         pass
+
+    def start_send_gcode_to_sdcard(self, params, update_fn, cancel_fn, wait_fn) -> int:
+        return 0
 
     def ping_bind(self) -> bool:
         return True
@@ -706,86 +527,43 @@ class AnycubicPrinterAgent(PrinterAgentBase):
 
 
 # ============================================================================
-# 5. Pacote do Plugin OrcaSlicer
+# 6. Pacote do Plugin OrcaSlicer
 # ============================================================================
 
 @orca.plugin
-class AnycubicCloudPlugin(orca.PythonPluginBase):
-    def register_capabilities(self):
-        orca.register_capability(AnycubicPrinterAgent)
+class AnycubicCloudPlugin(PluginBase):
+    """Pacote principal do plugin Anycubic Cloud para OrcaSlicer."""
+
+    @classmethod
+    def register_capabilities(cls):
+        """Registra as capacidades do plugin no carregamento do OrcaSlicer."""
+        try:
+            orca.register_capability(AnycubicCloudPage)
+        except Exception as e:
+            logger.warning("Falha ao registrar AnycubicCloudPage: %s", e)
+
+        try:
+            orca.register_capability(AnycubicPrinterAgent)
+        except Exception as e:
+            logger.warning("Falha ao registrar AnycubicPrinterAgent: %s", e)
+
         try:
             orca.request_permissions(
-                network=["mqtt-universe.anycubic.com", "cloud-universe.anycubic.com", "api.anycubic.com"]
+                network=[
+                    "https://cloud-universe.anycubic.com",
+                    "https://s3.anycubic.com",
+                    "https://oss.anycubic.com",
+                    "https://mqtt-universe.anycubic.com",
+                ],
+                threading=True,
+                fs_read=[str(CONFIG_DIR) + "/*"],
+                fs_readwrite=[str(CONFIG_DIR) + "/*"],
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Falha ao solicitar permissoes: %s", e)
 
     def has_config_ui(self) -> bool:
         return True
 
     def get_config_ui(self) -> str:
-        tok = get_token() or ""
-        logged = bool(tok)
-        return f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Anycubic Cloud</title>
-    <style>
-        body {{ font-family: Segoe UI, sans-serif; background: #23262b; color: #fff; padding: 20px; }}
-        .card {{ background: #2e323b; border-radius: 8px; padding: 20px; max-width: 420px; margin: auto; }}
-        h2 {{ color: #00a8ff; margin-top: 0; }}
-        input {{ width: 100%; padding: 8px; margin: 6px 0 14px; background: #3c424e; border: 1px solid #555; color: #fff; border-radius: 4px; box-sizing: border-box; }}
-        button {{ width: 100%; padding: 10px; background: #007aff; border: none; color: #fff; border-radius: 4px; font-weight: bold; cursor: pointer; }}
-        button:hover {{ background: #0062cc; }}
-        .status {{ margin-top: 10px; padding: 8px; border-radius: 4px; font-size: 13px; text-align: center; }}
-        .ok {{ background: rgba(46,204,113,0.2); color: #2ecc71; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h2>Anycubic Cloud</h2>
-        <div class="status {'ok' if logged else ''}">
-            {'✓ Conectado a conta Anycubic' if logged else 'Nenhuma conta conectada'}
-        </div>
-        <form onsubmit="doLogin(event)">
-            <label>E-mail ou Usuario:</label>
-            <input type="text" id="acc" required placeholder="seu_email@provedor.com">
-            <label>Senha:</label>
-            <input type="password" id="pwd" required placeholder="••••••••">
-            <button type="submit" id="b">Conectar</button>
-        </form>
-    </div>
-    <script>
-        async function doLogin(e) {{
-            e.preventDefault();
-            const b = document.getElementById('b');
-            b.innerText = 'Autenticando...';
-            b.disabled = true;
-            try {{
-                const r = await fetch('https://cloud-universe.anycubic.com/user/public/login', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json', 'XX-Device-Type': 'pc', 'XX-Version': '2.0.0' }},
-                    body: JSON.stringify({{ account: document.getElementById('acc').value, password: document.getElementById('pwd').value, login_type: 1 }})
-                }});
-                const d = await r.json();
-                if (d.code === 0 || d.code === 200) {{
-                    const t = d.data.access_token || d.data.token;
-                    if (window.orca && window.orca.saveConfig) {{
-                        window.orca.saveConfig(JSON.stringify({{ token: t, user_id: d.data.user_id }}));
-                    }}
-                    alert('Login efetuado com sucesso!');
-                    location.reload();
-                }} else {{
-                    alert('Erro: ' + (d.msg || 'Credenciais invalidas'));
-                }}
-            }} catch(err) {{
-                alert('Erro de conexao: ' + err.message);
-            }} finally {{
-                b.innerText = 'Conectar';
-                b.disabled = false;
-            }}
-        }}
-    </script>
-</body>
-</html>"""
+        return get_cloud_ui_html()
