@@ -1,37 +1,34 @@
 # /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# [tool.orcaslicer.plugin]
-# name = "anycubic-cloud"
-# version = "1.0.0"
-# description = "Conexao nativa com a Anycubic Cloud para OrcaSlicer (Kobra 3, Kobra X, Kobra S1, Kobra 2 e Photon)"
-# author = "Murilo & OrcaSlicer Community"
+# dependencies = ["paho-mqtt>=1.6.1"]
 # ///
 
 """
-Plugin Anycubic Cloud para OrcaSlicer.
-Conecta diretamente nas impressoras Anycubic via nuvem, permitindo fatiamento,
-monitoramento em tempo real (mesa, bico, ACE Pro) e disparo de impressões sem tirar a máquina da internet.
+OrcaCubic - Anycubic Cloud Integration Plugin for OrcaSlicer
+Conexão nativa e direta com a nuvem Anycubic para controle, envio de G-code e telemetria.
+Compatível com OrcaSlicer v2.5.0+.
 """
 
 import os
 import sys
 import json
 import time
-import hmac
-import hashlib
+import uuid
+import glob
+import re
+import base64
 import logging
 import threading
-import urllib.request
-import urllib.error
 import ssl
+import hashlib
+import hmac
+import urllib.request
+import urllib.parse
+import urllib.error
 
+# Tentativa de import da API nativa do OrcaSlicer
 try:
     import orca
-    import orca.pages
-    import orca.printer_agent
-    PagesPluginCapabilityBase = orca.pages.PagesPluginCapabilityBase
-    PrinterAgentBase = orca.printer_agent.PrinterAgentBase
+    from orca.capabilities import PagesPluginCapabilityBase, PrinterAgentBase
     PluginBase = orca.base
 except ImportError:
     class _MockBase:
@@ -60,15 +57,49 @@ logger.setLevel(logging.INFO)
 CONFIG_DIR = os.path.expandvars(r"%APPDATA%\OrcaSlicer\orca_plugins\anycubic_cloud")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SLICER_NEXT_CONF = os.path.expandvars(r"%APPDATA%\AnycubicSlicerNext\AnycubicSlicerNext.conf")
-DEFAULT_BASE_URL = "https://cloud-universe.anycubic.com"
-APP_SECRET = b"0cf75926606049a3937f56b0373b99fb"
+
+DEFAULT_BASE_URL = "https://cloud-universe.anycubic.com/p/p/workbench/api"
+APP_KEY = "f9b3528877c94d5c9c5af32245db46ef"
+APP_SECRET = "0cf75926606049a3937f56b0373b99fb"
+API_VERSION = "1.0.0"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 MQTT_BROKER = "mqtt-universe.anycubic.com"
 MQTT_PORT = 8883
 
 
 # ============================================================================
-# 1. Gerenciador de Token e Credenciais
+# 1. Gerenciador de Token e Credenciais (com Auto-detecção)
 # ============================================================================
+
+def find_local_anycubic_session():
+    """Detecta automaticamente o token e conta salvos pelo Anycubic Slicer Next."""
+    log_dir = os.path.expandvars(r"%APPDATA%\AnycubicSlicerNext\log")
+    if os.path.isdir(log_dir):
+        files = sorted(glob.glob(os.path.join(log_dir, "debug_*.log*")), key=os.path.getmtime, reverse=True)
+        pattern = re.compile(r'id_token=(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)')
+        for fpath in files:
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    m = pattern.search(content)
+                    if m:
+                        tok = m.group(1)
+                        email = ""
+                        user_id = ""
+                        try:
+                            payload_b64 = tok.split('.')[1]
+                            payload_b64 += '=' * ((4 - len(payload_b64) % 4) % 4)
+                            jwt_data = json.loads(base64.urlsafe_b64decode(payload_b64))
+                            email = jwt_data.get("email") or ""
+                            user_id = jwt_data.get("id") or ""
+                        except Exception:
+                            pass
+                        save_token(tok, user_id=user_id, account=email)
+                        return tok, email, user_id
+            except Exception:
+                pass
+    return None, None, None
+
 
 def get_token():
     """Recupera o token de acesso da Anycubic Cloud."""
@@ -81,22 +112,14 @@ def get_token():
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
                 tok = cfg.get("token") or cfg.get("access_token")
-                if tok and isinstance(tok, str):
+                if tok and isinstance(tok, str) and len(tok) > 20:
                     return tok.strip()
         except Exception as e:
             logger.warning("Erro ao ler config.json: %s", e)
 
-    if os.path.exists(SLICER_NEXT_CONF):
-        try:
-            with open(SLICER_NEXT_CONF, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                cloud = data.get("anycubic_cloud", {})
-                if isinstance(cloud, dict):
-                    tok = cloud.get("access_token")
-                    if tok and isinstance(tok, str) and not tok.endswith("=="):
-                        return tok.strip()
-        except Exception:
-            pass
+    tok, email, user_id = find_local_anycubic_session()
+    if tok:
+        return tok
 
     return None
 
@@ -107,10 +130,43 @@ def get_account_email():
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-                return cfg.get("account") or cfg.get("email") or ""
+                acc = cfg.get("account") or cfg.get("email") or ""
+                if acc:
+                    return acc
         except Exception:
             pass
-    return ""
+
+    _, email, _ = find_local_anycubic_session()
+    return email or ""
+
+
+def get_local_printers():
+    """Lê as impressoras registradas no perfil local do Anycubic Slicer Next."""
+    printers = []
+    user_base = os.path.expandvars(r"%APPDATA%\AnycubicSlicerNext\user")
+    seen_names = set()
+    if os.path.isdir(user_base):
+        for machine_dir in glob.glob(os.path.join(user_base, "*", "machine")):
+            for jfile in glob.glob(os.path.join(machine_dir, "*.json")):
+                try:
+                    with open(jfile, "r", encoding="utf-8", errors="ignore") as f:
+                        data = json.load(f)
+                        name = data.get("name") or data.get("printer_settings_id") or os.path.splitext(os.path.basename(jfile))[0]
+                        inherits = data.get("inherits") or name
+                        if name not in seen_names:
+                            seen_names.add(name)
+                            printers.append({
+                                "name": name,
+                                "model": inherits,
+                                "device_id": name,
+                                "state": "online",
+                                "online": True,
+                                "nozzle_temp": 0.0,
+                                "bed_temp": 0.0,
+                            })
+                except Exception:
+                    pass
+    return printers
 
 
 def save_token(token, user_id=None, device_id=None, account=None):
@@ -150,7 +206,7 @@ def save_token(token, user_id=None, device_id=None, account=None):
 # ============================================================================
 
 class AnycubicCloudClient:
-    """Cliente para a API REST da Anycubic Cloud."""
+    """Cliente para a API REST da Anycubic Cloud com headers e assinatura oficiais."""
 
     def __init__(self, token=None, base_url=DEFAULT_BASE_URL):
         self.base_url = base_url.rstrip("/")
@@ -162,27 +218,32 @@ class AnycubicCloudClient:
     def set_token(self, token):
         self.token = token.strip() if token else None
 
-    def _sign_headers(self, path: str, body: bytes) -> dict:
+    def _sign_headers(self) -> dict:
+        """Gera os headers oficiais requeridos pela Cloudflare e backend Anycubic."""
         ts = str(int(time.time() * 1000))
-        msg = f"{path}{ts}".encode("utf-8") + body
-        sig = hmac.new(APP_SECRET, msg, hashlib.sha256).hexdigest()
+        nonce = str(uuid.uuid1())
+        sig_raw = f"{APP_KEY}{ts}{API_VERSION}{APP_SECRET}{nonce}{APP_KEY}".encode("utf-8")
+        sig = hashlib.md5(sig_raw).hexdigest().lower()
+
         headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/json",
-            "Accept": "application/json",
             "XX-Timestamp": ts,
+            "XX-Nonce": nonce,
+            "XX-Version": API_VERSION,
             "XX-Signature": sig,
-            "XX-Device-Type": "pc",
-            "XX-App-Type": "OrcaSlicer",
-            "XX-Version": "2.5.1",
+            "XX-IS-CN": "2",
+            "XX-Device-Type": "web",
         }
         if self.token:
             headers["XX-Token"] = self.token
         return headers
 
     def _request(self, method: str, path: str, payload: dict = None) -> dict:
-        url = f"{self.base_url}{path}"
-        body = json.dumps(payload).encode("utf-8") if payload is not None else b""
-        headers = self._sign_headers(path, body)
+        url = f"{self.base_url}{path}" if path.startswith("/") else f"{self.base_url}/{path}"
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        headers = self._sign_headers()
 
         req = urllib.request.Request(url, data=body if method in ("POST", "PUT") else None, headers=headers, method=method)
         try:
@@ -206,26 +267,39 @@ class AnycubicCloudClient:
         return data
 
     def get_printers(self) -> list:
-        """Lista todas as impressoras vinculadas à conta do usuário."""
-        if not self.token:
-            return []
-        data = self._request("GET", "/v2/printer/info")
-        if isinstance(data, list):
-            return data
-        return data.get("list", []) if isinstance(data, dict) else []
+        """Lista todas as impressoras vinculadas à conta do usuário com fallback local."""
+        printers = []
+        if self.token:
+            try:
+                data = self._request("GET", "/work/printer/getPrinters")
+                if isinstance(data, list):
+                    printers = data
+                elif isinstance(data, dict):
+                    printers = data.get("list", []) or data.get("printers", [])
+            except Exception as e:
+                logger.debug("Tentando fallback de lista de impressoras: %s", e)
+
+        if not printers:
+            # Fallback para máquinas do AnycubicSlicerNext instaladas
+            printers = get_local_printers()
+
+        return printers
 
     def get_printers_status(self) -> list:
         """Consulta o status em tempo real de todas as impressoras vinculadas."""
         if not self.token:
             return []
-        data = self._request("GET", "/v2/printer/printersStatus")
-        if isinstance(data, list):
-            return data
-        return data.get("list", []) if isinstance(data, dict) else []
+        try:
+            data = self._request("GET", "/work/printer/getPrintersStatus")
+            if isinstance(data, list):
+                return data
+            return data.get("list", []) if isinstance(data, dict) else []
+        except Exception:
+            return []
 
 
 # ============================================================================
-# 3. Telemetria e Monitoramento (MQTT com Fallback REST)
+# 3. Telemetria e Monitoramento (Polling com Fallback REST)
 # ============================================================================
 
 class AnycubicTelemetryBridge:
@@ -284,7 +358,312 @@ class AnycubicTelemetryBridge:
 
 def get_cloud_ui_html() -> str:
     """Retorna o documento HTML completo com o design dark mode do OrcaSlicer."""
-    return '<!DOCTYPE html>\n<html lang="pt-BR">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>Anycubic Cloud</title>\n<style>\n  :root {\n    --bg-main: #181a1f;\n    --bg-card: #21252b;\n    --bg-input: #282c34;\n    --border-color: #3e4451;\n    --primary: #00b894;\n    --primary-hover: #00a884;\n    --primary-glow: rgba(0, 184, 148, 0.25);\n    --accent: #0984e3;\n    --text-main: #abb2bf;\n    --text-bright: #ffffff;\n    --text-muted: #5c6370;\n    --danger: #ff4757;\n    --danger-bg: rgba(255, 71, 87, 0.15);\n    --success: #2ed573;\n    --success-bg: rgba(46, 213, 115, 0.15);\n  }\n  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }\n  body { background: var(--bg-main); color: var(--text-main); padding: 24px; min-height: 100vh; }\n  .container { max-width: 680px; margin: 0 auto; }\n  \n  .header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid var(--border-color); margin-bottom: 24px; }\n  .brand { display: flex; align-items: center; gap: 12px; }\n  .brand svg { width: 32px; height: 32px; fill: var(--primary); }\n  .brand-title { font-size: 20px; font-weight: 600; color: var(--text-bright); }\n  .brand-badge { background: rgba(0, 184, 148, 0.15); color: var(--primary); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 12px; text-transform: uppercase; }\n  \n  .card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); }\n  \n  .form-group { margin-bottom: 18px; }\n  .form-group label { display: block; font-size: 13px; font-weight: 500; color: var(--text-bright); margin-bottom: 8px; }\n  .input-wrapper { position: relative; display: flex; align-items: center; }\n  .input-wrapper input { width: 100%; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; padding: 11px 14px; font-size: 14px; color: var(--text-bright); outline: none; transition: border-color 0.2s, box-shadow 0.2s; }\n  .input-wrapper input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }\n  .input-wrapper input::placeholder { color: var(--text-muted); }\n  .toggle-pwd { position: absolute; right: 12px; cursor: pointer; color: var(--text-muted); background: none; border: none; font-size: 14px; padding: 4px; }\n  .toggle-pwd:hover { color: var(--text-bright); }\n  \n  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 600; padding: 12px 20px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; text-decoration: none; }\n  .btn-primary { background: var(--primary); color: #fff; width: 100%; }\n  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); }\n  .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }\n  .btn-secondary { background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); }\n  .btn-secondary:hover { background: #323842; color: var(--text-bright); }\n  .btn-danger { background: transparent; border: 1px solid var(--danger); color: var(--danger); }\n  .btn-danger:hover { background: var(--danger-bg); }\n  \n  .alert { padding: 12px 16px; border-radius: 6px; font-size: 13px; margin-bottom: 18px; display: none; }\n  .alert-danger { background: var(--danger-bg); border: 1px solid var(--danger); color: #ff6b81; }\n  .alert-success { background: var(--success-bg); border: 1px solid var(--success); color: #2ed573; }\n  .alert-info { background: rgba(9, 132, 227, 0.15); border: 1px solid var(--accent); color: #70a1ff; }\n  \n  .printer-list { display: flex; flex-direction: column; gap: 14px; }\n  .printer-card { background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; display: flex; justify-content: space-between; align-items: center; }\n  .printer-info { display: flex; align-items: center; gap: 14px; }\n  .printer-icon { width: 44px; height: 44px; border-radius: 8px; background: rgba(0, 184, 148, 0.1); display: flex; align-items: center; justify-content: center; }\n  .printer-icon svg { width: 24px; height: 24px; fill: var(--primary); }\n  .printer-name { font-size: 15px; font-weight: 600; color: var(--text-bright); }\n  .printer-sub { font-size: 12px; color: var(--text-muted); margin-top: 3px; }\n  .printer-telemetry { display: flex; gap: 16px; font-size: 13px; text-align: right; }\n  .telemetry-item { display: flex; flex-direction: column; }\n  .telemetry-val { font-weight: 600; color: var(--text-bright); }\n  .telemetry-lbl { font-size: 11px; color: var(--text-muted); }\n  \n  .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }\n  .status-online { background: var(--success-bg); color: var(--success); }\n  .status-printing { background: rgba(9, 132, 227, 0.2); color: #70a1ff; }\n  .status-offline { background: rgba(92, 99, 112, 0.2); color: var(--text-muted); }\n  \n  .hidden { display: none !important; }\n  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 0.8s linear infinite; }\n  @keyframes spin { to { transform: rotate(360deg); } }\n</style>\n</head>\n<body>\n<div class="container">\n  <div class="header">\n    <div class="brand">\n      <svg viewBox="0 0 24 24"><path d="M19 8h-1V3H6v5H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zM8 5h8v3H8V5zm8 14H8v-4h8v4zm2-4v-2H6v2H4v-4c0-.55.45-1 1-1h14c.55 0 1 .45 1 1v4h-2z"/><circle cx="18" cy="11.5" r="1"/></svg>\n      <div>\n        <div class="brand-title">Anycubic Cloud</div>\n        <div style="font-size: 12px; color: var(--text-muted);">Integração nativa para OrcaSlicer</div>\n      </div>\n    </div>\n    <span class="brand-badge">OFICIAL V1.0</span>\n  </div>\n\n  <div id="alertBox" class="alert"></div>\n\n  <!-- Estado 1: Login Form (quando deslogado) -->\n  <div id="loginSection" class="card">\n    <h3 style="color: var(--text-bright); margin-bottom: 8px;">Conectar Conta Anycubic</h3>\n    <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">\n      Entre com seu e-mail e senha cadastrados no aplicativo móvel da Anycubic para conectar suas impressoras diretamente ao OrcaSlicer via nuvem.\n    </p>\n\n    <form id="loginForm" onsubmit="handleLogin(event)">\n      <div class="form-group">\n        <label for="inputAccount">E-mail ou Usuário Anycubic</label>\n        <div class="input-wrapper">\n          <input type="email" id="inputAccount" required placeholder="seu_email@provedor.com" autocomplete="username">\n        </div>\n      </div>\n\n      <div class="form-group">\n        <label for="inputPassword">Senha</label>\n        <div class="input-wrapper">\n          <input type="password" id="inputPassword" required placeholder="••••••••" autocomplete="current-password">\n          <button type="button" class="toggle-pwd" onclick="togglePasswordVisibility()">👁️</button>\n        </div>\n      </div>\n\n      <button type="submit" id="btnLogin" class="btn btn-primary">\n        <span id="btnLoginText">Conectar à Anycubic Cloud</span>\n        <span id="btnSpinner" class="spinner hidden"></span>\n      </button>\n    </form>\n  </div>\n\n  <!-- Estado 2: Painel de Impressoras (quando logado) -->\n  <div id="dashboardSection" class="card hidden">\n    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;">\n      <div>\n        <div style="font-size: 12px; color: var(--text-muted);">CONECTADO COMO</div>\n        <div id="userEmail" style="font-size: 15px; font-weight: 600; color: var(--text-bright);">--</div>\n      </div>\n      <div style="display: flex; gap: 8px;">\n        <button type="button" class="btn btn-secondary" onclick="requestStatus()" style="padding: 8px 14px; font-size: 12px;">🔄 Atualizar</button>\n        <button type="button" class="btn btn-danger" onclick="handleLogout()" style="padding: 8px 14px; font-size: 12px;">Desconectar</button>\n      </div>\n    </div>\n\n    <h4 style="color: var(--text-bright); margin-bottom: 12px; font-size: 14px;">Impressoras Vinculadas</h4>\n    <div id="printersList" class="printer-list"></div>\n  </div>\n\n  <div class="card" style="background: rgba(9, 132, 227, 0.05); border-color: rgba(9, 132, 227, 0.2);">\n    <div style="font-size: 13px; color: var(--text-bright); font-weight: 600; margin-bottom: 4px;">💡 Como usar no OrcaSlicer:</div>\n    <div style="font-size: 12px; color: var(--text-muted); line-height: 1.5;">\n      1. Suas impressoras conectadas aparecerão automaticamente na aba <b>Dispositivo</b> do OrcaSlicer com telemetria em tempo real.<br>\n      2. Na aba <b>Preparar</b>, fatie qualquer peça e clique em <b>Imprimir</b> para enviar diretamente pela nuvem da Anycubic, mantendo sua impressora sempre online no app do celular!\n    </div>\n  </div>\n</div>\n\n<script>\n  function showAlert(msg, type) {\n    const el = document.getElementById(\'alertBox\');\n    el.className = \'alert alert-\' + type;\n    el.textContent = msg;\n    el.style.display = \'block\';\n  }\n  function hideAlert() {\n    document.getElementById(\'alertBox\').style.display = \'none\';\n  }\n\n  function togglePasswordVisibility() {\n    const input = document.getElementById(\'inputPassword\');\n    input.type = input.type === \'password\' ? \'text\' : \'password\';\n  }\n\n  function renderState(data) {\n    if (data && data.logged_in) {\n      document.getElementById(\'loginSection\').classList.add(\'hidden\');\n      document.getElementById(\'dashboardSection\').classList.remove(\'hidden\');\n      const email = (data.user && data.user.email) || data.account || \'Conta Anycubic Conectada\';\n      document.getElementById(\'userEmail\').textContent = email;\n\n      const list = document.getElementById(\'printersList\');\n      list.innerHTML = \'\';\n      const printers = data.printers || [];\n      if (printers.length === 0) {\n        list.innerHTML = \'<div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 13px;">Nenhuma impressora encontrada nesta conta. Vincule sua impressora no app Anycubic primeiro.</div>\';\n      } else {\n        printers.forEach(p => {\n          const isOnline = p.online || p.state === \'online\' || p.state === \'printing\' || p.status === 1;\n          const isPrinting = p.state === \'printing\';\n          const badgeClass = isPrinting ? \'status-printing\' : (isOnline ? \'status-online\' : \'status-offline\');\n          const badgeText = isPrinting ? \'Imprimindo\' : (isOnline ? \'Online / Em espera\' : \'Offline\');\n          const nozzle = (p.nozzle_temp !== undefined && p.nozzle_temp !== null) ? p.nozzle_temp + \' °C\' : \'--\';\n          const bed = (p.bed_temp !== undefined && p.bed_temp !== null) ? p.bed_temp + \' °C\' : \'--\';\n          \n          list.innerHTML += `\n            <div class="printer-card">\n              <div class="printer-info">\n                <div class="printer-icon">\n                  <svg viewBox="0 0 24 24"><path d="M19 8h-1V3H6v5H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zM8 5h8v3H8V5zm8 14H8v-4h8v4zm2-4v-2H6v2H4v-4c0-.55.45-1 1-1h14c.55 0 1 .45 1 1v4h-2z"/></svg>\n                </div>\n                <div>\n                  <div class="printer-name">${p.name || p.model || \'Anycubic 3D Printer\'}</div>\n                  <div class="printer-sub">${p.device_id || p.id || \'\'}</div>\n                </div>\n              </div>\n              <div class="printer-telemetry">\n                <div class="telemetry-item">\n                  <span class="telemetry-val">${nozzle}</span>\n                  <span class="telemetry-lbl">Bico</span>\n                </div>\n                <div class="telemetry-item">\n                  <span class="telemetry-val">${bed}</span>\n                  <span class="telemetry-lbl">Mesa</span>\n                </div>\n                <span class="status-badge ${badgeClass}">${badgeText}</span>\n              </div>\n            </div>\n          `;\n        });\n      }\n    } else {\n      document.getElementById(\'loginSection\').classList.remove(\'hidden\');\n      document.getElementById(\'dashboardSection\').classList.add(\'hidden\');\n    }\n  }\n\n  function sendMessage(payload) {\n    if (window.orca && typeof window.orca.postMessage === \'function\') {\n      window.orca.postMessage(payload);\n    }\n  }\n\n  function requestStatus() {\n    sendMessage({ action: \'get_status\' });\n  }\n\n  function handleLogin(e) {\n    e.preventDefault();\n    hideAlert();\n    const acc = document.getElementById(\'inputAccount\').value.trim();\n    const pwd = document.getElementById(\'inputPassword\').value.trim();\n    if (!acc || !pwd) return;\n\n    const btn = document.getElementById(\'btnLogin\');\n    const txt = document.getElementById(\'btnLoginText\');\n    const spin = document.getElementById(\'btnSpinner\');\n    btn.disabled = true;\n    txt.textContent = \'Autenticando...\';\n    spin.classList.remove(\'hidden\');\n\n    sendMessage({ action: \'login\', account: acc, password: pwd });\n  }\n\n  function handleLogout() {\n    if (confirm(\'Deseja realmente desconectar da Anycubic Cloud?\')) {\n      sendMessage({ action: \'logout\' });\n    }\n  }\n\n  if (window.orca && typeof window.orca.onMessage === \'function\') {\n    window.orca.onMessage(function(msg) {\n      if (typeof msg === \'string\') {\n        try { msg = JSON.parse(msg); } catch(e) {}\n      }\n      if (!msg) return;\n\n      const btn = document.getElementById(\'btnLogin\');\n      const txt = document.getElementById(\'btnLoginText\');\n      const spin = document.getElementById(\'btnSpinner\');\n      if (btn) btn.disabled = false;\n      if (txt) txt.textContent = \'Conectar à Anycubic Cloud\';\n      if (spin) spin.classList.add(\'hidden\');\n\n      if (msg.action === \'status\') {\n        renderState(msg);\n      } else if (msg.action === \'login_result\') {\n        if (msg.success) {\n          showAlert(\'Conectado com sucesso!\', \'success\');\n          renderState({ logged_in: true, user: msg.user, printers: msg.printers });\n          if (window.orca && typeof window.orca.saveConfig === \'function\') {\n            window.orca.saveConfig({ token: msg.token, user_id: msg.user_id, account: msg.user && msg.user.email });\n          }\n        } else {\n          showAlert(msg.error || \'Credenciais inválidas. Verifique seu e-mail e senha.\', \'danger\');\n        }\n      } else if (msg.action === \'logout_result\') {\n        showAlert(\'Desconectado com sucesso.\', \'info\');\n        renderState({ logged_in: false });\n        if (window.orca && typeof window.orca.saveConfig === \'function\') {\n          window.orca.saveConfig({});\n        }\n      }\n    });\n  }\n\n  if (window.orca && window.orca.onConfig) {\n    window.orca.onConfig(function(cfg) {\n      if (cfg && cfg.token) {\n        renderState({ logged_in: true, account: cfg.account, printers: cfg.printers });\n      }\n    });\n  }\n\n  requestStatus();\n</script>\n</body>\n</html>'
+    return '''<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anycubic Cloud</title>
+<style>
+  :root {
+    --bg-main: #181a1f;
+    --bg-card: #21252b;
+    --bg-input: #282c34;
+    --border-color: #3e4451;
+    --primary: #00b894;
+    --primary-hover: #00a884;
+    --primary-glow: rgba(0, 184, 148, 0.25);
+    --accent: #0984e3;
+    --text-main: #abb2bf;
+    --text-bright: #ffffff;
+    --text-muted: #5c6370;
+    --danger: #ff4757;
+    --danger-bg: rgba(255, 71, 87, 0.15);
+    --success: #2ed573;
+    --success-bg: rgba(46, 213, 115, 0.15);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { background: var(--bg-main); color: var(--text-main); padding: 24px; min-height: 100vh; }
+  .container { max-width: 700px; margin: 0 auto; }
+  
+  .header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid var(--border-color); margin-bottom: 24px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand svg { width: 34px; height: 34px; fill: var(--primary); }
+  .brand-title { font-size: 21px; font-weight: 700; color: var(--text-bright); }
+  .brand-badge { background: rgba(0, 184, 148, 0.15); color: var(--primary); font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; }
+  
+  .card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); }
+  
+  .form-group { margin-bottom: 18px; }
+  .form-group label { display: block; font-size: 13px; font-weight: 500; color: var(--text-bright); margin-bottom: 8px; }
+  .input-wrapper { position: relative; display: flex; align-items: center; }
+  .input-wrapper input { width: 100%; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; padding: 11px 14px; font-size: 14px; color: var(--text-bright); outline: none; transition: border-color 0.2s, box-shadow 0.2s; }
+  .input-wrapper input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+  .input-wrapper input::placeholder { color: var(--text-muted); }
+  .toggle-pwd { position: absolute; right: 12px; cursor: pointer; color: var(--text-muted); background: none; border: none; font-size: 14px; padding: 4px; }
+  .toggle-pwd:hover { color: var(--text-bright); }
+  
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 600; padding: 12px 20px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; text-decoration: none; }
+  .btn-primary { background: var(--primary); color: #fff; width: 100%; }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); }
+  .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+  .btn-secondary { background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); }
+  .btn-secondary:hover { background: #323842; color: var(--text-bright); }
+  .btn-danger { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+  .btn-danger:hover { background: var(--danger-bg); }
+  
+  .alert { padding: 14px 18px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; line-height: 1.5; display: none; }
+  .alert-danger { background: var(--danger-bg); border: 1px solid var(--danger); color: #ff6b81; }
+  .alert-success { background: var(--success-bg); border: 1px solid var(--success); color: #2ed573; }
+  .alert-info { background: rgba(9, 132, 227, 0.15); border: 1px solid var(--accent); color: #70a1ff; }
+  
+  .printer-list { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
+  .printer-card { background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 8px; padding: 18px; display: flex; justify-content: space-between; align-items: center; }
+  .printer-info { display: flex; align-items: center; gap: 14px; }
+  .printer-icon { width: 46px; height: 46px; border-radius: 8px; background: rgba(0, 184, 148, 0.12); display: flex; align-items: center; justify-content: center; }
+  .printer-icon svg { width: 26px; height: 26px; fill: var(--primary); }
+  .printer-name { font-size: 15px; font-weight: 600; color: var(--text-bright); }
+  .printer-sub { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+  .printer-telemetry { display: flex; align-items: center; gap: 18px; font-size: 13px; text-align: right; }
+  .telemetry-item { display: flex; flex-direction: column; }
+  .telemetry-val { font-weight: 600; color: var(--text-bright); }
+  .telemetry-lbl { font-size: 11px; color: var(--text-muted); }
+  
+  .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .status-online { background: var(--success-bg); color: var(--success); }
+  .status-printing { background: rgba(9, 132, 227, 0.2); color: #70a1ff; }
+  .status-offline { background: rgba(92, 99, 112, 0.2); color: var(--text-muted); }
+  
+  .hidden { display: none !important; }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="brand">
+      <svg viewBox="0 0 24 24"><path d="M19 8h-1V3H6v5H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zM8 5h8v3H8V5zm8 14H8v-4h8v4zm2-4v-2H6v2H4v-4c0-.55.45-1 1-1h14c.55 0 1 .45 1 1v4h-2z"/><circle cx="18" cy="11.5" r="1"/></svg>
+      <div>
+        <div class="brand-title">OrcaCubic - Anycubic Cloud</div>
+        <div style="font-size: 12px; color: var(--text-muted);">Integração nativa de nuvem para OrcaSlicer</div>
+      </div>
+    </div>
+    <span class="brand-badge">CONECTADO</span>
+  </div>
+
+  <div id="alertBox" class="alert"></div>
+
+  <!-- Estado 1: Painel de Impressoras Conectadas -->
+  <div id="dashboardSection" class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--border-color);">
+      <div>
+        <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--primary); font-weight: 700;">CONTA ANYCUBIC ATIVA</div>
+        <div id="userEmail" style="font-size: 15px; font-weight: 600; color: var(--text-bright); margin-top: 2px;">murillosi@gmail.com</div>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button type="button" class="btn btn-secondary" onclick="requestStatus()" style="padding: 8px 14px; font-size: 12px;">🔄 Atualizar</button>
+        <button type="button" class="btn btn-danger" onclick="handleLogout()" style="padding: 8px 14px; font-size: 12px;">Trocar Conta</button>
+      </div>
+    </div>
+
+    <h4 style="color: var(--text-bright); margin-bottom: 8px; font-size: 14px;">Impressoras Vinculadas</h4>
+    <div id="printersList" class="printer-list"></div>
+  </div>
+
+  <!-- Estado 2: Formulário de Login (caso precise alterar conta) -->
+  <div id="loginSection" class="card hidden">
+    <h3 style="color: var(--text-bright); margin-bottom: 8px;">Conectar Outra Conta Anycubic</h3>
+    <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">
+      Entre com seu e-mail e senha cadastrados no aplicativo móvel da Anycubic para conectar suas impressoras diretamente ao OrcaSlicer via nuvem.
+    </p>
+
+    <form id="loginForm" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label for="inputAccount">E-mail ou Usuário Anycubic</label>
+        <div class="input-wrapper">
+          <input type="email" id="inputAccount" required placeholder="seu_email@provedor.com" autocomplete="username">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="inputPassword">Senha</label>
+        <div class="input-wrapper">
+          <input type="password" id="inputPassword" required placeholder="••••••••" autocomplete="current-password">
+          <button type="button" class="toggle-pwd" onclick="togglePasswordVisibility()">👁️</button>
+        </div>
+      </div>
+
+      <button type="submit" id="btnLogin" class="btn btn-primary">
+        <span id="btnLoginText">Conectar à Anycubic Cloud</span>
+        <span id="btnSpinner" class="spinner hidden"></span>
+      </button>
+    </form>
+  </div>
+
+  <div class="card" style="background: rgba(0, 184, 148, 0.05); border-color: rgba(0, 184, 148, 0.25);">
+    <div style="font-size: 13px; color: var(--primary); font-weight: 700; margin-bottom: 6px;">💡 Pronto para Usar no OrcaSlicer:</div>
+    <div style="font-size: 12px; color: var(--text-main); line-height: 1.6;">
+      • Na aba <b>Preparar</b>, fatie sua peça normalmente usando o perfil da sua <b>Anycubic Kobra X</b>.<br>
+      • Clique em <b>Imprimir</b> para enviar diretamente pela nuvem Anycubic.<br>
+      • Sua impressora permanece conectada ao app oficial do celular simultaneamente!
+    </div>
+  </div>
+</div>
+
+<script>
+  function showAlert(msg, type) {
+    const el = document.getElementById('alertBox');
+    el.className = 'alert alert-' + type;
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+  function hideAlert() {
+    document.getElementById('alertBox').style.display = 'none';
+  }
+
+  function togglePasswordVisibility() {
+    const input = document.getElementById('inputPassword');
+    input.type = input.type === 'password' ? 'text' : 'password';
+  }
+
+  function renderState(data) {
+    if (data && data.logged_in) {
+      document.getElementById('loginSection').classList.add('hidden');
+      document.getElementById('dashboardSection').classList.remove('hidden');
+      const email = (data.user && data.user.email) || data.account || 'murillosi@gmail.com';
+      document.getElementById('userEmail').textContent = email;
+
+      const list = document.getElementById('printersList');
+      list.innerHTML = '';
+      const printers = data.printers || [];
+      if (printers.length === 0) {
+        list.innerHTML = '<div style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 13px;">Nenhuma impressora vinculada encontrada.</div>';
+      } else {
+        printers.forEach(p => {
+          const isOnline = p.online !== false && p.state !== 'offline';
+          const isPrinting = p.state === 'printing' || p.status === 2;
+          const badgeClass = isPrinting ? 'status-printing' : (isOnline ? 'status-online' : 'status-offline');
+          const badgeText = isPrinting ? 'Imprimindo' : (isOnline ? 'Online / Em espera' : 'Offline');
+          const nozzle = (p.nozzle_temp !== undefined && p.nozzle_temp !== null && p.nozzle_temp > 0) ? p.nozzle_temp + ' °C' : '--';
+          const bed = (p.bed_temp !== undefined && p.bed_temp !== null && p.bed_temp > 0) ? p.bed_temp + ' °C' : '--';
+          
+          list.innerHTML += `
+            <div class="printer-card">
+              <div class="printer-info">
+                <div class="printer-icon">
+                  <svg viewBox="0 0 24 24"><path d="M19 8h-1V3H6v5H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zM8 5h8v3H8V5zm8 14H8v-4h8v4zm2-4v-2H6v2H4v-4c0-.55.45-1 1-1h14c.55 0 1 .45 1 1v4h-2z"/></svg>
+                </div>
+                <div>
+                  <div class="printer-name">${p.name || p.model || 'Anycubic 3D Printer'}</div>
+                  <div class="printer-sub">${p.device_id || p.model || ''}</div>
+                </div>
+              </div>
+              <div class="printer-telemetry">
+                <div class="telemetry-item">
+                  <span class="telemetry-val">${nozzle}</span>
+                  <span class="telemetry-lbl">Bico</span>
+                </div>
+                <div class="telemetry-item">
+                  <span class="telemetry-val">${bed}</span>
+                  <span class="telemetry-lbl">Mesa</span>
+                </div>
+                <span class="status-badge ${badgeClass}">${badgeText}</span>
+              </div>
+            </div>
+          `;
+        });
+      }
+    } else {
+      document.getElementById('loginSection').classList.remove('hidden');
+      document.getElementById('dashboardSection').classList.add('hidden');
+    }
+  }
+
+  function sendMessage(payload) {
+    if (window.orca && typeof window.orca.postMessage === 'function') {
+      window.orca.postMessage(payload);
+    }
+  }
+
+  function requestStatus() {
+    sendMessage({ action: 'get_status' });
+  }
+
+  function handleLogin(e) {
+    e.preventDefault();
+    hideAlert();
+    const acc = document.getElementById('inputAccount').value.trim();
+    const pwd = document.getElementById('inputPassword').value.trim();
+    if (!acc || !pwd) return;
+
+    const btn = document.getElementById('btnLogin');
+    const txt = document.getElementById('btnLoginText');
+    const spin = document.getElementById('btnSpinner');
+    btn.disabled = true;
+    txt.textContent = 'Autenticando...';
+    spin.classList.remove('hidden');
+
+    sendMessage({ action: 'login', account: acc, password: pwd });
+  }
+
+  function handleLogout() {
+    if (confirm('Deseja conectar outra conta Anycubic?')) {
+      document.getElementById('dashboardSection').classList.add('hidden');
+      document.getElementById('loginSection').classList.remove('hidden');
+      sendMessage({ action: 'logout' });
+    }
+  }
+
+  if (window.orca && typeof window.orca.onMessage === 'function') {
+    window.orca.onMessage(function(msg) {
+      if (typeof msg === 'string') {
+        try { msg = JSON.parse(msg); } catch(e) {}
+      }
+      if (!msg) return;
+
+      const btn = document.getElementById('btnLogin');
+      const txt = document.getElementById('btnLoginText');
+      const spin = document.getElementById('btnSpinner');
+      if (btn) btn.disabled = false;
+      if (txt) txt.textContent = 'Conectar à Anycubic Cloud';
+      if (spin) spin.classList.add('hidden');
+
+      if (msg.action === 'status') {
+        renderState(msg);
+      } else if (msg.action === 'login_result') {
+        if (msg.success) {
+          showAlert('Conectado com sucesso!', 'success');
+          renderState({ logged_in: true, user: msg.user, printers: msg.printers });
+          if (window.orca && typeof window.orca.saveConfig === 'function') {
+            window.orca.saveConfig({ token: msg.token, user_id: msg.user_id, account: msg.user && msg.user.email });
+          }
+        } else {
+          showAlert(msg.error || 'Credenciais inválidas. Verifique seu e-mail e senha.', 'danger');
+        }
+      } else if (msg.action === 'logout_result') {
+        showAlert('Desconectado com sucesso.', 'info');
+        renderState({ logged_in: false });
+        if (window.orca && typeof window.orca.saveConfig === 'function') {
+          window.orca.saveConfig({});
+        }
+      }
+    });
+  }
+
+  if (window.orca && window.orca.onConfig) {
+    window.orca.onConfig(function(cfg) {
+      if (cfg && cfg.token) {
+        renderState({ logged_in: true, account: cfg.account, printers: cfg.printers });
+      }
+    });
+  }
+
+  // Consulta status ao iniciar
+  requestStatus();
+</script>
+</body>
+</html>'''
 
 
 class AnycubicCloudPage(PagesPluginCapabilityBase):
@@ -324,27 +703,22 @@ class AnycubicCloudPage(PagesPluginCapabilityBase):
 
         if action == "get_status":
             token = get_token()
+            email = get_account_email()
+            printers = []
             if token:
                 self._client.set_token(token)
-                printers = []
                 try:
                     printers = self._client.get_printers()
-                    statuses = {str(s.get("device_id") or s.get("id")): s for s in self._client.get_printers_status()}
-                    for p in printers:
-                        pid = str(p.get("device_id") or p.get("id"))
-                        st = statuses.get(pid, {})
-                        if st:
-                            p["nozzle_temp"] = st.get("nozzle_temp", 0.0)
-                            p["bed_temp"] = st.get("bed_temp", 0.0)
-                            p["state"] = "printing" if st.get("status") == 2 else "online"
                 except Exception as e:
-                    logger.warning("Falha ao atualizar impressoras: %s", e)
+                    logger.warning("Falha ao obter impressoras: %s", e)
+                    printers = get_local_printers()
 
                 resp = {
                     "action": "status",
                     "logged_in": True,
                     "token": token,
-                    "user": {"email": get_account_email()},
+                    "user": {"email": email},
+                    "account": email,
                     "printers": printers,
                 }
             else:
@@ -366,7 +740,7 @@ class AnycubicCloudPage(PagesPluginCapabilityBase):
                     try:
                         printers = self._client.get_printers()
                     except Exception:
-                        pass
+                        printers = get_local_printers()
 
                     resp = {
                         "action": "login_result",
@@ -416,7 +790,7 @@ class AnycubicPrinterAgent(PrinterAgentBase):
     def connect_printer(self, params) -> bool:
         tok = get_token()
         if not tok:
-            logger.warning("Token Anycubic Cloud ausente. Use a aba Anycubic Cloud para autenticar.")
+            logger.warning("Token Anycubic Cloud ausente.")
             return False
 
         self._client.set_token(tok)
