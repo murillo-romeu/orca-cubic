@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bancada de trabalho - Anycubic Cloud</title>
+<style>
+  :root {
+    --bg-page: #f0f2f5;
+    --bg-card: #ffffff;
+    --border-card: #e5e7eb;
+    --text-primary: #111827;
+    --text-secondary: #4b5563;
+    --text-muted: #9ca3af;
+    --primary: #2563eb;
+    --primary-light: #eff6ff;
+    --warning: #f59e0b;
+    --warning-bg: #fef3c7;
+    --danger: #ef4444;
+    --danger-bg: #fee2e2;
+    --success: #10b981;
+    --success-bg: #d1fae5;
+    --purple: #8b5cf6;
+    --purple-light: #ede9fe;
+    --card-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.07), 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  }
+
+  body.dark-mode {
+    --bg-page: #121418;
+    --bg-card: #1c1f26;
+    --border-card: #2e3440;
+    --text-primary: #f3f4f6;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
+    --primary: #3b82f6;
+    --primary-light: rgba(59, 130, 246, 0.15);
+    --warning: #fbbf24;
+    --warning-bg: rgba(245, 158, 11, 0.15);
+    --danger: #f87171;
+    --danger-bg: rgba(239, 68, 68, 0.15);
+    --success: #34d399;
+    --success-bg: rgba(16, 185, 129, 0.15);
+    --purple: #a78bfa;
+    --purple-light: rgba(139, 92, 246, 0.15);
+    --card-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { background: var(--bg-page); color: var(--text-primary); padding: 16px 24px; min-height: 100vh; transition: background 0.2s, color 0.2s; }
+
+  /* Top Navigation & Header */
+  .top-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-card);
+  }
+  .brand-area {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .brand-area svg {
+    width: 26px;
+    height: 26px;
+    fill: var(--primary);
+  }
+  .brand-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .brand-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .top-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .badge-connected {
+    background: var(--success-bg);
+    color: var(--success);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .badge-connected::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .account-pill {
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    padding: 4px 12px;
+    border-radius: 16px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+  .btn-sm {
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    color: var(--text-secondary);
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-sm:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  /* Printer Tabs Navigation */
+  .printer-tabs {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .tab-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 8px 18px;
+    border-radius: 8px 8px 0 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: relative;
+    transition: all 0.15s;
+  }
+  .tab-btn:hover {
+    background: rgba(0, 0, 0, 0.03);
+    color: var(--text-primary);
+  }
+  .tab-btn.active {
+    background: var(--bg-card);
+    border-color: var(--border-card);
+    border-bottom-color: var(--bg-card);
+    color: var(--primary);
+    box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.03);
+  }
+  .status-pill {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .status-pill.busy {
+    background: var(--warning-bg);
+    color: var(--warning);
+  }
+  .status-pill.idle {
+    background: var(--success-bg);
+    color: var(--success);
+  }
+
+  /* Grid Layout (3x2 cards) */
+  .workbench-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+
+  @media (max-width: 1200px) {
+    .workbench-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  @media (max-width: 768px) {
+    .workbench-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .wb-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    border-radius: 12px;
+    padding: 16px 20px;
+    box-shadow: var(--card-shadow);
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .card-header .header-link {
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+    transition: color 0.15s;
+  }
+  .card-header .header-link:hover {
+    color: var(--primary);
+  }
+
+  /* Card 1: Tarefa de Impressão */
+  .task-content {
+    display: flex;
+    gap: 16px;
+  }
+  .task-thumb {
+    width: 95px;
+    height: 95px;
+    background: #f8fafc;
+    border: 1px solid var(--border-card);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .task-thumb img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+  }
+  .task-details {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-width: 0;
+  }
+  .task-filename {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .task-stats-row {
+    display: flex;
+    gap: 16px;
+    margin: 8px 0;
+  }
+  .stat-col {
+    display: flex;
+    flex-direction: column;
+  }
+  .stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .stat-val {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .task-progress-area {
+    margin-top: 10px;
+  }
+  .task-status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .status-text {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+  }
+  .progress-val {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--primary);
+  }
+  .progress-bar-bg {
+    width: 100%;
+    height: 7px;
+    background: var(--border-card);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+  }
+
+  .task-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-card);
+  }
+  .btn-action {
+    background: transparent;
+    border: none;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.15s;
+  }
+  .btn-skip { color: var(--text-secondary); }
+  .btn-skip:hover { background: rgba(0,0,0,0.05); }
+  .btn-pause { color: var(--primary); }
+  .btn-pause:hover { background: var(--primary-light); }
+  .btn-stop { color: var(--danger); }
+  .btn-stop:hover { background: var(--danger-bg); }
+
+  /* Card 2: Control */
+  .control-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  .control-item {
+    background: var(--bg-page);
+    border: 1px solid var(--border-card);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .control-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .control-value {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .control-toggle-btn {
+    background: var(--border-card);
+    border: none;
+    border-radius: 12px;
+    padding: 2px 8px;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    cursor: pointer;
+    width: fit-content;
+    margin-top: 2px;
+  }
+  .control-toggle-btn.on {
+    background: var(--primary);
+    color: #fff;
+  }
+  .control-bottom-links {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-card);
+  }
+  .control-link-btn {
+    background: transparent;
+    border: 1px solid var(--border-card);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    transition: all 0.15s;
+  }
+  .control-link-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  /* Card 3: Info do Dispositivo */
+  .device-content {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+  }
+  .device-thumb {
+    width: 80px;
+    height: 80px;
+    background: #f8fafc;
+    border: 1px solid var(--border-card);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .device-thumb img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+  }
+  .device-info-list {
+    flex: 1;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .device-name {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .device-meta-row {
+    color: var(--text-secondary);
+    font-size: 11px;
+  }
+  .device-spec-footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-card);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .spec-item {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .spec-item:hover {
+    color: var(--primary);
+  }
+
+  /* Card 4: Câmera */
+  .camera-viewport {
+    width: 100%;
+    height: 180px;
+    background: #0f172a;
+    border-radius: 8px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .camera-placeholder-icon {
+    font-size: 32px;
+    color: #475569;
+  }
+  .camera-overlay-controls {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    display: flex;
+    gap: 8px;
+  }
+  .cam-btn {
+    background: rgba(0, 0, 0, 0.5);
+    border: none;
+    color: #fff;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 13px;
+    backdrop-filter: blur(4px);
+    transition: background 0.15s;
+  }
+  .cam-btn:hover {
+    background: rgba(0, 0, 0, 0.8);
+  }
+  .camera-live-badge {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(16, 185, 129, 0.85);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 10px;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* Card 5: Gestão de Materiais */
+  .material-tabs {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border-card);
+    padding-bottom: 6px;
+  }
+  .mat-tab-btn {
+    background: none;
+    border: none;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding-bottom: 4px;
+    position: relative;
+  }
+  .mat-tab-btn.active {
+    color: var(--primary);
+  }
+  .mat-tab-btn.active::after {
+    content: '';
+    position: absolute;
+    bottom: -7px;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--primary);
+  }
+  .spool-slots-container {
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    padding: 10px 0;
+  }
+  .spool-slot {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .spool-circle {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+  }
+  .spool-circle.silk-multi {
+    background: conic-gradient(#ec4899, #8b5cf6, #3b82f6, #06b6d4, #ec4899);
+    border: 3px solid #fff;
+    box-shadow: 0 2px 8px rgba(139, 92, 246, 0.4);
+  }
+  .spool-circle.empty {
+    border: 2px dashed var(--border-card);
+    background: var(--bg-page);
+  }
+  .spool-hole {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--bg-card);
+  }
+  .spool-type {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .spool-idx {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-muted);
+    border: 1px solid var(--border-card);
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .spool-idx.active {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+  }
+
+  /* Card 6: Mover Eixo */
+  .step-selector {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .step-pill {
+    flex: 1;
+    background: var(--bg-page);
+    border: 1px solid var(--border-card);
+    padding: 4px 0;
+    text-align: center;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .step-pill.active {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+  }
+  .jog-area {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 24px;
+    margin: 8px 0;
+  }
+  .dpad-container {
+    width: 110px;
+    height: 110px;
+    border-radius: 50%;
+    background: var(--bg-page);
+    border: 1px solid var(--border-card);
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .dpad-btn {
+    position: absolute;
+    background: transparent;
+    border: none;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.15s;
+  }
+  .dpad-btn:hover {
+    color: var(--primary);
+    background: rgba(0,0,0,0.05);
+  }
+  .dpad-y-plus { top: 4px; }
+  .dpad-y-minus { bottom: 4px; }
+  .dpad-x-minus { left: 4px; }
+  .dpad-x-plus { right: 4px; }
+  .dpad-center {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .dpad-center:hover {
+    border-color: var(--primary);
+  }
+
+  .z-axis-col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: center;
+  }
+  .z-btn {
+    background: var(--bg-page);
+    border: 1px solid var(--border-card);
+    border-radius: 6px;
+    width: 34px;
+    height: 30px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .z-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .jog-disclaimer {
+    font-size: 10px;
+    color: var(--text-muted);
+    line-height: 1.4;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-card);
+  }
+</style>
+</head>
+<body>
+
+  <!-- Top Header Bar -->
+  <div class="top-header">
+    <div class="brand-area">
+      <svg viewBox="0 0 24 24"><path d="M19 8h-1V3H6v5H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zM8 5h8v3H8V5zm8 14H8v-4h8v4zm2-4v-2H6v2H4v-4c0-.55.45-1 1-1h14c.55 0 1 .45 1 1v4h-2z"/></svg>
+      <div>
+        <div class="brand-title">Bancada de trabalho</div>
+        <div class="brand-sub">Anycubic Cloud Workspace</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span class="badge-connected">CONECTADO</span>
+      <span class="account-pill" id="userEmailBadge">murillosi@gmail.com</span>
+      <button class="btn-sm" onclick="toggleTheme()">🌓 Tema</button>
+      <button class="btn-sm" onclick="requestStatus()">🔄 Atualizar</button>
+    </div>
+  </div>
+
+  <!-- Printer Navigation Tabs -->
+  <div class="printer-tabs">
+    <button class="tab-btn active" id="tabKobraX" onclick="selectPrinterView('kobra_x')">
+      <span>Anycubic Kobra X</span>
+      <span class="status-pill busy" id="kobraXStatusBadge">Ocupado</span>
+    </button>
+    <button class="tab-btn" id="tabKobra2" onclick="selectPrinterView('kobra_2')">
+      <span>Anycubic Kobra 2 Plus</span>
+      <span class="status-pill idle">Em espera</span>
+    </button>
+  </div>
+
+  <!-- Main 6-Card Workbench Grid -->
+  <div class="workbench-grid">
+
+    <!-- Card 1: Tarefa de impressão -->
+    <div class="wb-card">
+      <div class="card-header">
+        <span>Tarefa de impressão</span>
+        <span class="header-link">›</span>
+      </div>
+      <div class="task-content">
+        <div class="task-thumb">
+          <img id="jobThumbnail" src="" alt="3D Model Preview">
+        </div>
+        <div class="task-details">
+          <div class="task-filename" id="jobFilename" title="1116-1332-Nativity Scene LR41_LR1130_multipart_plate(01)_PLA_0.2">
+            1116-1332-Nativity Scene LR41_LR1130_multipart_plate(01)_PL...
+          </div>
+          <div class="task-stats-row">
+            <div class="stat-col">
+              <span class="stat-label">Camadas</span>
+              <span class="stat-val" id="jobLayers">37/542</span>
+            </div>
+            <div class="stat-col">
+              <span class="stat-label">Restante</span>
+              <span class="stat-val" id="jobRemaining">4h11m/4h24m</span>
+            </div>
+            <div class="stat-col">
+              <span class="stat-label">Término estimado</span>
+              <span class="stat-val" id="jobEstimated">11-18 23:59</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="task-progress-area">
+        <div class="task-status-row">
+          <span class="status-text" id="jobStatusText">Imprimindo...</span>
+          <span class="progress-val" id="jobProgressText">22%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="jobProgressBar" style="width: 22%;"></div>
+        </div>
+      </div>
+      <div class="task-actions">
+        <button class="btn-action btn-skip" onclick="handleJobAction('skip')">⇥ Pular</button>
+        <button class="btn-action btn-pause" id="btnPauseResume" onclick="handleJobAction('pause')">⏸ Pausa</button>
+        <button class="btn-action btn-stop" onclick="handleJobAction('stop')">⏹ Fim</button>
+      </div>
+    </div>
+
+    <!-- Card 2: Control -->
+    <div class="wb-card">
+      <div class="card-header">
+        <span>Control</span>
+      </div>
+      <div class="control-grid">
+        <div class="control-item">
+          <span class="control-title">⌂ Bocal</span>
+          <span class="control-value" id="nozzleTempVal">205°C <span style="font-size: 11px; color: var(--text-muted);">/ 205°C</span></span>
+        </div>
+        <div class="control-item">
+          <span class="control-title">♨ Mesa aqu...</span>
+          <span class="control-value" id="bedTempVal">60°C <span style="font-size: 11px; color: var(--text-muted);">/ 60°C</span></span>
+        </div>
+        <div class="control-item">
+          <span class="control-title">💡 Luz câmera</span>
+          <button class="control-toggle-btn" id="lightToggleBtn" onclick="toggleCameraLight()">DESLIGADO</button>
+        </div>
+        <div class="control-item">
+          <span class="control-title">❄ Vent. mod...</span>
+          <span class="control-value" id="fanSpeedVal">60%</span>
+        </div>
+        <div class="control-item">
+          <span class="control-title">⚡ Modo de v...</span>
+          <span class="control-value" id="speedModeVal">Standard</span>
+        </div>
+      </div>
+      <div class="control-bottom-links">
+        <button class="control-link-btn" onclick="openAssistant()">Assistência... ›</button>
+        <button class="control-link-btn" onclick="openDetection()">Detecção ... ›</button>
+        <button class="control-link-btn" onclick="openCalibration()">Calibração ›</button>
+      </div>
+    </div>
+
+    <!-- Card 3: Info do dispositivo -->
+    <div class="wb-card">
+      <div class="card-header">
+        <span>Info do dispositivo</span>
+      </div>
+      <div class="device-content">
+        <div class="device-thumb">
+          <img id="printerCoverImg" src="" alt="Printer Cover">
+        </div>
+        <div class="device-info-list">
+          <div class="device-name">
+            <span id="printerNameText">Anycubic Kobra X</span>
+            <span class="status-pill busy" id="deviceStatusPill">Ocupado</span>
+          </div>
+          <div class="device-meta-row" style="margin-top: 4px;">Modelo: <span id="printerModelText">Anycubic Kobra X</span></div>
+          <div class="device-meta-row">CN: <span id="printerCnText">6DE5-AF26-3FC9-6D7D</span> <span style="cursor: pointer;" onclick="copyCn()">📋</span></div>
+          <div class="device-meta-row">Firmware: <span id="printerFwText">V 2.0.2.8</span></div>
+        </div>
+      </div>
+      <div class="device-spec-footer">
+        <div class="spec-item">
+          <span>▦ Placa PEI texturizada</span>
+          <span>›</span>
+        </div>
+        <div class="spec-item">
+          <span>⚙ Aço endurecido 0.4mm</span>
+          <span>›</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Card 4: Câmera -->
+    <div class="wb-card">
+      <div class="card-header">
+        <span>Câmera</span>
+      </div>
+      <div class="camera-viewport">
+        <span class="camera-live-badge">● AO VIVO</span>
+        <div class="camera-placeholder-icon">📹</div>
+        <div class="camera-overlay-controls">
+          <button class="cam-btn" title="Luz" onclick="toggleCameraLight()">💡</button>
+          <button class="cam-btn" title="Tela Cheia" onclick="expandCamera()">⛶</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Card 5: Gestão de materiais -->
+    <div class="wb-card">
+      <div class="card-header">
+        <span>Gestão de materiais</span>
+      </div>
+      <div class="material-tabs">
+        <button class="mat-tab-btn">Suporte</button>
+        <button class="mat-tab-btn active">ACE 1</button>
+      </div>
+      <div class="spool-slots-container">
+        <!-- Slot 1: Multicolor Silk -->
+        <div class="spool-slot">
+          <div class="spool-circle silk-multi">
+            <div class="spool-hole"></div>
+          </div>
+          <span class="spool-type">PLA Silk</span>
+          <span class="spool-idx active">1</span>
+        </div>
+        <!-- Slot 2 -->
+        <div class="spool-slot">
+          <div class="spool-circle empty">
+            <div class="spool-hole"></div>
+          </div>
+          <span class="spool-type">/</span>
+          <span class="spool-idx">2</span>
+        </div>
+        <!-- Slot 3 -->
+        <div class="spool-slot">
+          <div class="spool-circle empty">
+            <div class="spool-hole"></div>
+          </div>
+          <span class="spool-type">/</span>
+          <span class="spool-idx">3</span>
+        </div>
+        <!-- Slot 4 -->
+        <div class="spool-slot">
+          <div class="spool-circle empty" style="border: 1px solid var(--border-card); background: #f8fafc;">
+            <span style="font-size: 10px; font-weight: 700; color: var(--text-muted);">ACE</span>
+          </div>
+          <span class="spool-type">ACE</span>
+          <span class="spool-idx">4</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Card 6: Mover eixo -->
+    <div class="wb-card">
+      <div class="card-header">
+        <span>Mover eixo</span>
+      </div>
+      <div class="step-selector">
+        <div class="step-pill active" onclick="setJogStep(1)">1mm</div>
+        <div class="step-pill" onclick="setJogStep(15)">15mm</div>
+        <div class="step-pill" onclick="setJogStep(50)">50mm</div>
+        <div class="step-pill" onclick="setJogStep('ext')">Extrusor</div>
+      </div>
+      <div class="jog-area">
+        <div class="dpad-container">
+          <button class="dpad-btn dpad-y-plus" onclick="sendJog('Y', 1)">Y+</button>
+          <button class="dpad-btn dpad-x-minus" onclick="sendJog('X', -1)">X-</button>
+          <button class="dpad-btn dpad-x-plus" onclick="sendJog('X', 1)">X+</button>
+          <button class="dpad-btn dpad-y-minus" onclick="sendJog('Y', -1)">Y-</button>
+          <div class="dpad-center" onclick="sendHome('xy')" title="Home XY">⌂</div>
+        </div>
+        <div class="z-axis-col">
+          <button class="z-btn" onclick="sendJog('Z', 1)">Z+</button>
+          <button class="z-btn" onclick="sendHome('z')" title="Home Z">⌂</button>
+          <button class="z-btn" onclick="sendJog('Z', -1)">Z-</button>
+        </div>
+      </div>
+      <div class="jog-disclaimer">
+        O controle de eixos ativará automaticamente o monitoramento remoto. Observe a distância entre bocal e mesa para evitar colisão.
+      </div>
+    </div>
+
+  </div>
+
+</body>
+</html>
