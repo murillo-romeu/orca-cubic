@@ -1,5 +1,11 @@
 # /// script
-# dependencies = ["paho-mqtt>=1.6.1"]
+# requires-python = ">=3.12"
+# dependencies = []
+# [tool.orcaslicer.plugin]
+# name = "anycubic-cloud"
+# version = "1.0.0"
+# description = "Conexao nativa com a Anycubic Cloud para OrcaSlicer (Kobra 3, Kobra X, Kobra S1, Kobra 2 e Photon)"
+# author = "Murilo & OrcaSlicer Community"
 # ///
 
 """
@@ -28,7 +34,10 @@ import urllib.error
 # Tentativa de import da API nativa do OrcaSlicer
 try:
     import orca
-    from orca.capabilities import PagesPluginCapabilityBase, PrinterAgentBase
+    import orca.pages
+    import orca.printer_agent
+    PagesPluginCapabilityBase = orca.pages.PagesPluginCapabilityBase
+    PrinterAgentBase = orca.printer_agent.PrinterAgentBase
     PluginBase = orca.base
 except ImportError:
     class _MockBase:
