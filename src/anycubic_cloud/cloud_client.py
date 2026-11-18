@@ -26,6 +26,30 @@ class AnycubicCloudClient:
         # Permissive SSL context for secure HTTPS requests
         self.ssl_ctx = ssl.create_default_context()
 
+    def login(self, account, password):
+        """
+        Authenticate directly with Anycubic Cloud using email and password.
+        Returns dict with token info or error.
+        """
+        payload = {
+            "account": str(account).strip(),
+            "password": str(password).strip(),
+            "login_type": 1
+        }
+        res = self._request("POST", "/user/public/login", payload=payload)
+        logger.info(f"Login response code: {res.get('code')}")
+
+        if res.get("code") in [0, 200]:
+            data = res.get("data", {})
+            token = data.get("access_token") or data.get("token")
+            user_id = data.get("user_id")
+            if token:
+                self.set_token(token)
+                return {"success": True, "token": token, "user_id": user_id, "data": data}
+
+        errMsg = res.get("msg") or res.get("message") or res.get("error") or "Falha no login"
+        return {"success": False, "error": errMsg, "code": res.get("code")}
+
     def set_token(self, token):
         self.token = token
 

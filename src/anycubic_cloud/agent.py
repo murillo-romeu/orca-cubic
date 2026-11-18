@@ -54,10 +54,28 @@ class AnycubicPrinterAgent(PrinterAgentBase):
         """Called by OrcaSlicer when activating the physical printer profile."""
         logger.info(f"connect_printer called with params: {params}")
         self.token = get_token()
+
+        # If not logged in, pop up the native Anycubic login dialog window!
         if not self.token:
-            logger.warning("No Anycubic Cloud token found. Please configure token in config.json")
+            logger.info("No token found. Opening Anycubic Login Dialog...")
+            try:
+                import subprocess
+                candidates = [
+                    os.path.join(os.path.dirname(__file__), "login_dialog.ps1"),
+                    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "tools", "login_dialog.ps1")
+                ]
+                for script in candidates:
+                    if os.path.exists(script):
+                        subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", script], timeout=180)
+                        self.token = get_token()
+                        break
+            except Exception as e:
+                logger.error(f"Error launching login dialog: {e}")
+
+        if not self.token:
+            logger.warning("No Anycubic Cloud token configured.")
             if self._on_user_message_fn:
-                self._on_user_message_fn("Anycubic Cloud: Token not configured. Please paste your token in plugin settings.")
+                self._on_user_message_fn("Anycubic Cloud: Faca login com usuario e senha para conectar sua impressora.")
             return False
 
         self.cloud_client.set_token(self.token)
