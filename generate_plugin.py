@@ -20,6 +20,48 @@ script_logic = """
   const kobraXCover = 'data:image/webp;base64,""" + kobra_x_thumb + """';
   const activePrintThumb = 'data:image/webp;base64,""" + active_thumb + """';
 
+  // Telemetria Dinâmica Contínua (Alinhada com a Kobra X e Término às 23:59)
+  const totalDurationSec = 19380; // 5h23m
+  const totalLayers = 542;
+  const finishTime = new Date();
+  finishTime.setHours(23, 59, 0, 0);
+
+  function tickTelemetry() {
+    if (isPrintingPaused) return;
+    const now = new Date();
+    let remSec = Math.max(0, Math.floor((finishTime.getTime() - now.getTime()) / 1000));
+    let elapsedSec = Math.max(0, Math.min(totalDurationSec, totalDurationSec - remSec));
+    let pct = Math.max(1, Math.min(100, Math.round((elapsedSec / totalDurationSec) * 100)));
+    let curLayer = Math.max(1, Math.min(totalLayers, Math.round((elapsedSec / totalDurationSec) * totalLayers)));
+
+    let remH = Math.floor(remSec / 3600);
+    let remM = Math.floor((remSec % 3600) / 60);
+    let remStr = remH + 'h' + (remM < 10 ? '0' : '') + remM + 'm/5h23m';
+
+    const layEl = document.getElementById('jobLayers');
+    if (layEl) layEl.textContent = curLayer + '/' + totalLayers;
+
+    const remEl = document.getElementById('jobRemaining');
+    if (remEl) remEl.textContent = remStr;
+
+    const progEl = document.getElementById('jobProgressText');
+    if (progEl) progEl.textContent = pct + '%';
+
+    const barEl = document.getElementById('jobProgressBar');
+    if (barEl) barEl.style.width = pct + '%';
+
+    const fanEl = document.getElementById('fanSpeedVal');
+    if (fanEl) fanEl.textContent = '94%';
+
+    // Micro oscilação térmica realista
+    const nzDelta = (Math.sin(now.getTime() / 2000) * 0.2).toFixed(1);
+    const bdDelta = (Math.cos(now.getTime() / 3000) * 0.1).toFixed(1);
+    const nzEl = document.getElementById('nozzleTempVal');
+    if (nzEl) nzEl.innerHTML = (205 + parseFloat(nzDelta)).toFixed(1) + '°C <span style="font-size: 11px; color: var(--text-muted);">/ 205°C</span>';
+    const bdEl = document.getElementById('bedTempVal');
+    if (bdEl) bdEl.innerHTML = (60 + parseFloat(bdDelta)).toFixed(1) + '°C <span style="font-size: 11px; color: var(--text-muted);">/ 60°C</span>';
+  }
+
   function toggleTheme() {
     document.body.classList.toggle('dark-mode');
     localStorage.setItem('ac_workbench_theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
@@ -125,17 +167,28 @@ script_logic = """
       const btn = document.getElementById('btnPauseResume');
       const statusText = document.getElementById('jobStatusText');
       if (isPrintingPaused) {
-        btn.innerHTML = '▶ Retomar';
-        statusText.textContent = 'Pausado';
+        if (btn) btn.innerHTML = '▶ Retomar';
+        if (statusText) {
+          statusText.textContent = 'Pausado';
+          statusText.style.color = '#f59e0b';
+        }
         showToast('Impressão pausada');
       } else {
-        btn.innerHTML = '⏸ Pausa';
-        statusText.textContent = 'Imprimindo...';
+        if (btn) btn.innerHTML = '⏸ Pausa';
+        if (statusText) {
+          statusText.textContent = 'Imprimindo...';
+          statusText.style.color = '#00bb99';
+        }
         showToast('Impressão retomada');
       }
       sendMessage({ action: isPrintingPaused ? 'pause_print' : 'resume_print' });
     } else if (action === 'stop') {
       if (confirm('Deseja realmente cancelar a impressão atual da Anycubic Kobra X?')) {
+        const statusText = document.getElementById('jobStatusText');
+        if (statusText) {
+          statusText.textContent = 'Cancelando...';
+          statusText.style.color = '#ef4444';
+        }
         showToast('Comando de cancelamento enviado');
         sendMessage({ action: 'stop_print' });
       }
@@ -148,14 +201,15 @@ script_logic = """
   function toggleCameraLight() {
     isCameraLightOn = !isCameraLightOn;
     const btn = document.getElementById('lightToggleBtn');
-    if (isCameraLightOn) {
-      btn.textContent = 'LIGADO';
-      btn.classList.add('on');
-      showToast('Luz da câmera ligada');
-    } else {
-      btn.textContent = 'DESLIGADO';
-      btn.classList.remove('on');
-      showToast('Luz da câmera desligada');
+    if (btn) {
+      btn.textContent = isCameraLightOn ? 'LIGADO' : 'DESLIGADO';
+      if (isCameraLightOn) {
+        btn.classList.add('on');
+        showToast('Luz da câmera ligada');
+      } else {
+        btn.classList.remove('on');
+        showToast('Luz da câmera desligada');
+      }
     }
     sendMessage({ action: 'toggle_light', state: isCameraLightOn });
   }
@@ -163,13 +217,13 @@ script_logic = """
   function setJogStep(step) {
     currentJogStep = step;
     document.querySelectorAll('.step-pill').forEach(el => el.classList.remove('active'));
-    event.target.classList.add('active');
+    if (event && event.target) event.target.classList.add('active');
     showToast('Passo de movimento: ' + (step === 'ext' ? 'Extrusor' : step + 'mm'));
   }
 
   function sendJog(axis, dir) {
     const dist = (typeof currentJogStep === 'number') ? currentJogStep * dir : 5 * dir;
-    showToast('Mover ' + axis + ': ' + (dist > 0 ? '+' : '') + dist + 'mm');
+    showToast('Mover ' + axis.toUpperCase() + ': ' + (dist > 0 ? '+' : '') + dist + 'mm');
     sendMessage({ action: 'jog', axis: axis, distance: dist });
   }
 
@@ -191,7 +245,11 @@ script_logic = """
 
   function sendMessage(payload) {
     if (window.orca && typeof window.orca.postMessage === 'function') {
-      window.orca.postMessage(payload);
+      try {
+        window.orca.postMessage(payload);
+      } catch (e) {
+        console.warn('Erro ao enviar mensagem:', e);
+      }
     }
   }
 
@@ -200,29 +258,44 @@ script_logic = """
     showToast('Atualizando telemetria...');
   }
 
-  if (window.orca && typeof window.orca.onMessage === 'function') {
-    window.orca.onMessage(function(msg) {
-      if (typeof msg === 'string') {
-        try { msg = JSON.parse(msg); } catch(e) {}
-      }
-      if (!msg) return;
-      if (msg.action === 'status') {
-        updateUIFromStatus(msg);
-      } else if (msg.action === 'cmd_result') {
-        if (msg.status_update) {
-          updateUIFromStatus(msg.status_update);
+  function attachOrcaBridge() {
+    if (window.orca && typeof window.orca.onMessage === 'function') {
+      window.orca.onMessage(function(msg) {
+        if (typeof msg === 'string') {
+          try { msg = JSON.parse(msg); } catch(e) {}
         }
-      }
-    });
+        if (!msg) return;
+        if (msg.action === 'status') {
+          updateUIFromStatus(msg);
+        } else if (msg.action === 'cmd_result') {
+          if (msg.status_update) {
+            updateUIFromStatus(msg.status_update);
+          }
+        }
+      });
+      sendMessage({ action: 'get_status' });
+      return true;
+    }
+    return false;
   }
 
-  // Inicializa solicitando telemetria em tempo real
-  setTimeout(requestStatus, 300);
+  // Inicia motor de telemetria contínua
+  tickTelemetry();
+  setInterval(tickTelemetry, 1000);
 
-  // Polling automático a cada 2.5 segundos para atualização suave
+  // Conecta bridge com repetição garantida
+  if (!attachOrcaBridge()) {
+    const pollInterval = setInterval(function() {
+      if (attachOrcaBridge()) {
+        clearInterval(pollInterval);
+      }
+    }, 80);
+  }
+
+  // Polling de sincronização com o backend a cada 3 segundos
   setInterval(() => {
     sendMessage({ action: 'get_status' });
-  }, 2500);
+  }, 3000);
 </script>
 """
 
@@ -293,7 +366,7 @@ DEFAULT_BASE_URL = "https://cloud-universe.anycubic.com/p/p/workbench/api"
 APP_KEY = "f9b3528877c94d5c9c5af32245db46ef"
 APP_SECRET = "0cf75926606049a3937f56b0373b99fb"
 API_VERSION = "V3.0.0"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0"
 MQTT_BROKER = "mqtt-universe.anycubic.com"
 MQTT_PORT = 8883
 
@@ -394,14 +467,15 @@ class TelemetryEngine:
         self.camera_light = False
         self.is_paused = False
         self.total_layers = 542
-        self.total_duration_sec = 264 * 60  # 4h24m
-        # Ancoragem do trabalho: ~85 minutos transcorridos
-        self.start_time = time.time() - (85 * 60)
+        self.total_duration_sec = 323 * 60  # 5h23m (19380s)
+        target_struct = time.localtime()
+        target_ts = time.mktime((target_struct.tm_year, target_struct.tm_mon, target_struct.tm_mday, 23, 59, 0, 0, 0, -1))
+        self.start_time = target_ts - self.total_duration_sec
         self.paused_duration = 0
         self.pause_start = 0
         self.target_nozzle = 205
         self.target_bed = 60
-        self.fan_speed = 60
+        self.fan_speed = 94
         self.speed_mode = "Standard"
 
     def set_camera_light(self, state: bool):
@@ -434,7 +508,7 @@ class TelemetryEngine:
         rem_sec = max(0, int(self.total_duration_sec - effective_elapsed))
         rem_h = rem_sec // 3600
         rem_m = (rem_sec % 3600) // 60
-        rem_str = f"{rem_h}h{rem_m:02d}m/4h24m"
+        rem_str = f"{rem_h}h{rem_m:02d}m/5h23m"
 
         # Flutuação realista de temperatura (±0.2°C)
         cur_nozzle = round(self.target_nozzle + (0.1 if int(now) % 2 == 0 else -0.1), 1)
