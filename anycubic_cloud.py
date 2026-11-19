@@ -1614,6 +1614,9 @@ class AnycubicCloudPage(PagesPluginCapabilityBase):
         self._client = AnycubicCloudClient()
         self._engine = TelemetryEngine.get()
 
+    def get_name(self) -> str:
+        return "Anycubic Cloud"
+
     def get_title(self) -> str:
         return "Anycubic Cloud"
 
@@ -1914,10 +1917,13 @@ class AnycubicCloudPlugin(PluginBase):
                 ],
                 threading=True,
                 fs_read=[str(CONFIG_DIR) + "/*"],
-                fs_write=[str(CONFIG_DIR) + "/*"],
+                fs_readwrite=[str(CONFIG_DIR) + "/*"],
             )
         except Exception as e:
             logger.warning("Falha ao solicitar permissoes: %s", e)
+
+    def get_name(self) -> str:
+        return "anycubic_cloud"
 
     def has_config_ui(self) -> bool:
         return True
